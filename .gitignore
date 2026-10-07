@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.wrangler/
+
+# Env files (never commit secrets/local config)
+.env
+.env.local
+.env.*.local
+
+# Editor/OS
+.vscode/
+.DS_Store
+
+# Logs
+*.log

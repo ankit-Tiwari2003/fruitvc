@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fruitvc-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "vars": {
+    // Update this to your actual Pages URL before deploying.
+    // For local dev with `wrangler dev`, the frontend origin during
+    // `vite dev` is typically http://localhost:5173.
+    "ALLOWED_ORIGIN": "http://localhost:5173"
+  },
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOM",
+        "class_name": "RoomDurableObject"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RoomDurableObject"]
+    }
+  ],
+
+  "kv_namespaces": [
+    {
+      "binding": "RATE_LIMIT",
+      // Run `npx wrangler kv namespace create RATE_LIMIT` and paste the id here.
+      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+    }
+  ]
+}
