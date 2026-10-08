@@ -9,7 +9,7 @@
     // Update this to your actual Pages URL before deploying.
     // For local dev with `wrangler dev`, the frontend origin during
     // `vite dev` is typically http://localhost:5173.
-    "ALLOWED_ORIGIN": "http://localhost:5173"
+    "ALLOWED_ORIGIN": "https://fruitvc.vercel.app"
   },
 
   "durable_objects": {
@@ -32,7 +32,7 @@
     {
       "binding": "RATE_LIMIT",
       // Run `npx wrangler kv namespace create RATE_LIMIT` and paste the id here.
-      "id": "REPLACE_WITH_KV_NAMESPACE_ID"
+      "id": "ca59ee8e2c824deaa2799fb9637181b2"
     }
   ]
 }

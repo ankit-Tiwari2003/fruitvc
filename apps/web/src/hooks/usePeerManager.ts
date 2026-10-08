@@ -34,7 +34,7 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
   useEffect(() => {
     // Wait for the mic before starting — PeerManager needs a real stream
     // to attach tracks to every peer connection it creates.
-    if (!opts.localStream) return;
+    if (!opts.localStream || !opts.roomId || !opts.participantId || !opts.token) return;
 
     const manager = new PeerManager({
       apiBaseUrl: getApiBaseUrl(),

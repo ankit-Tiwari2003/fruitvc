@@ -19,20 +19,20 @@ export function RoomPage() {
   const { stream, error: micError, isLoading: micLoading } = useLocalStream();
 
   // Join the room (HTTP) exactly once per roomId.
-  useEffect(() => {
-    if (!roomId) return;
-    let cancelled = false;
-    joinRoom(roomId)
-      .then((res) => {
-        if (!cancelled) setIdentity(res);
-      })
-      .catch(() => {
-        if (!cancelled) setJoinError("Could not join this room. It may not exist or may be full.");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [roomId]);
+useEffect(() => {
+  if (!roomId || !stream) return;
+  let cancelled = false;
+  joinRoom(roomId)
+    .then((res) => {
+      if (!cancelled) setIdentity(res);
+    })
+    .catch(() => {
+      if (!cancelled) setJoinError("Could not join this room. It may not exist or may be full.");
+    });
+  return () => {
+    cancelled = true;
+  };
+}, [roomId, stream]);
 
   const { participants, remoteStreams, connectionStats, error: peerError } = usePeerManager({
     roomId: roomId ?? "",
