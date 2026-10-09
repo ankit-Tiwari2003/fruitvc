@@ -7,6 +7,8 @@ export interface ParticipantGridProps {
   localParticipantId: string;
   remoteStreams: Map<string, MediaStream>;
   connectionStats: Map<string, ConnectionStats>;
+  volume: number;
+  localMicLive: boolean;
 }
 
 export function ParticipantGrid({
@@ -14,9 +16,11 @@ export function ParticipantGrid({
   localParticipantId,
   remoteStreams,
   connectionStats,
+  volume,
+  localMicLive,
 }: ParticipantGridProps) {
   return (
-    <div style={{ display: "flex", flexWrap: "wrap", gap: "1rem" }}>
+    <div className="grid">
       {participants.map((p) => (
         <ParticipantTile
           key={p.id}
@@ -24,6 +28,8 @@ export function ParticipantGrid({
           isLocal={p.id === localParticipantId}
           remoteStream={remoteStreams.get(p.id)}
           stats={connectionStats.get(p.id)}
+          volume={volume}
+          micLive={localMicLive}
         />
       ))}
     </div>

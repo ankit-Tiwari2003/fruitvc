@@ -32,71 +32,30 @@ export function HomePage() {
   }
 
   return (
-    <div
-      style={{
-        fontFamily: "system-ui, sans-serif",
-        maxWidth: "420px",
-        margin: "4rem auto",
-        padding: "0 1rem",
-        textAlign: "center",
-      }}
-    >
-      <h1>🍉 FruitVC</h1>
-      <p style={{ color: "#6b7280" }}>Anonymous, instant voice chat for gaming. No accounts.</p>
+    <div className="home">
+      <div className="card">
+        <h1>🍉 FruitVC</h1>
+        <p className="muted">Anonymous, instant voice chat for gaming. No accounts.</p>
 
-      <div style={{ marginTop: "2rem" }}>
-        <button
-          onClick={handleCreateRoom}
-          disabled={isCreating}
-          style={{
-            padding: "0.9rem 2rem",
-            borderRadius: "0.75rem",
-            border: "none",
-            backgroundColor: "#111827",
-            color: "white",
-            fontWeight: 600,
-            fontSize: "1rem",
-            cursor: "pointer",
-            width: "100%",
-          }}
-        >
+        <button className="btn btn-primary btn-block" onClick={handleCreateRoom} disabled={isCreating}>
           {isCreating ? "Creating…" : "Create Room"}
         </button>
+
+        <div className="divider">or</div>
+
+        <form className="join-form" onSubmit={handleJoinRoom}>
+          <input
+            className="input"
+            value={joinCode}
+            onChange={(e) => setJoinCode(e.target.value)}
+            placeholder="Room code"
+            maxLength={8}
+          />
+          <button className="btn btn-secondary" type="submit">Join</button>
+        </form>
+
+        {error && <p className="error">{error}</p>}
       </div>
-
-      <div style={{ margin: "1.5rem 0", color: "#9ca3af" }}>— or —</div>
-
-      <form onSubmit={handleJoinRoom} style={{ display: "flex", gap: "0.5rem" }}>
-        <input
-          value={joinCode}
-          onChange={(e) => setJoinCode(e.target.value)}
-          placeholder="Enter room code"
-          maxLength={8}
-          style={{
-            flex: 1,
-            padding: "0.75rem 1rem",
-            borderRadius: "0.75rem",
-            border: "1px solid #d1d5db",
-            fontSize: "1rem",
-            textTransform: "uppercase",
-          }}
-        />
-        <button
-          type="submit"
-          style={{
-            padding: "0.75rem 1.25rem",
-            borderRadius: "0.75rem",
-            border: "1px solid #111827",
-            backgroundColor: "white",
-            fontWeight: 600,
-            cursor: "pointer",
-          }}
-        >
-          Join
-        </button>
-      </form>
-
-      {error && <p style={{ color: "#ef4444", marginTop: "1rem" }}>{error}</p>}
     </div>
   );
 }

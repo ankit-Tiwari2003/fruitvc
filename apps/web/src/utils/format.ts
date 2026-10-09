@@ -17,3 +17,18 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     return false;
   }
 }
+
+export function formatJitter(ms: number | null): string {
+  if (ms === null) return "—";
+  return `${ms.toFixed(1)}ms`;
+}
+
+/** Converts a byte count over an interval into kbps (bytes*8 / ms = kbit/s). */
+export function bytesToKbps(bytes: number, intervalMs: number): number {
+  if (intervalMs <= 0) return 0;
+  return (bytes * 8) / intervalMs;
+}
+
+export function formatKbps(kbps: number): string {
+  return `${Math.round(kbps)} kbps`;
+}

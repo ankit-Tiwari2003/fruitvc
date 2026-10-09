@@ -26,6 +26,8 @@ export interface ConnectionStats {
   relayProvider: TurnProviderId | null;
   bytesSentDelta: number;
   bytesReceivedDelta: number;
+  /** Poll interval these deltas cover, so the UI can convert bytes to kbps. */
+  intervalMs: number;
 }
 
 export interface ConnectionMonitorOptions {
@@ -178,6 +180,7 @@ export class ConnectionMonitor {
       relayProvider: isRelayed ? this.opts.relayProvider : null,
       bytesSentDelta: sentDelta,
       bytesReceivedDelta: receivedDelta,
+      intervalMs: this.opts.pollIntervalMs,
     });
   }
 
