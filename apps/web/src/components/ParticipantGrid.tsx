@@ -9,6 +9,9 @@ export interface ParticipantGridProps {
   connectionStats: Map<string, ConnectionStats>;
   volume: number;
   localMicLive: boolean;
+  localInputLabel: string;
+  selectedId: string | null;
+  onSelect: (participantId: string | null) => void;
 }
 
 export function ParticipantGrid({
@@ -18,10 +21,19 @@ export function ParticipantGrid({
   connectionStats,
   volume,
   localMicLive,
+  localInputLabel,
+  selectedId,
+  onSelect,
 }: ParticipantGridProps) {
+  // Keep your own card first so the layout doesn't shuffle as people join.
+  const ordered = [...participants].sort(
+    (a, b) => Number(b.id === localParticipantId) - Number(a.id === localParticipantId)
+  );
+  const hasPeers = participants.some((p) => p.id !== localParticipantId);
+
   return (
     <div className="grid">
-      {participants.map((p) => (
+      {ordered.map((p) => (
         <ParticipantTile
           key={p.id}
           participant={p}
@@ -30,8 +42,17 @@ export function ParticipantGrid({
           stats={connectionStats.get(p.id)}
           volume={volume}
           micLive={localMicLive}
+          inputLabel={localInputLabel}
+          selected={p.id === selectedId}
+          onSelect={() => onSelect(p.id === selectedId ? null : p.id)}
         />
       ))}
+      {!hasPeers && (
+        <div className="card card--empty">
+          <strong>Waiting for friends…</strong>
+          <p className="muted small">Share the invite link or the room code.</p>
+        </div>
+      )}
     </div>
   );
 }

@@ -74,6 +74,27 @@ export class PeerManager {
     this.signaling.close();
   }
 
+  /**
+   * Swaps the outgoing audio track on every existing peer connection.
+   * RTCRtpSender.replaceTrack needs no SDP renegotiation, so remote peers
+   * hear the new mic seamlessly. Connections created afterwards pick up the
+   * new track automatically because the shared localStream is updated by
+   * the caller (see useLocalStream.commitTrack).
+   */
+  async replaceAudioTrack(newTrack: MediaStreamTrack): Promise<void> {
+    await Promise.all(
+      [...this.peers.entries()].map(async ([participantId, { pc }]) => {
+        const sender = pc.getSenders().find((s) => s.track?.kind === "audio");
+        if (!sender) return;
+        try {
+          await sender.replaceTrack(newTrack);
+        } catch (err) {
+          console.warn(`Could not switch mic for peer ${participantId}:`, err);
+        }
+      })
+    );
+  }
+
   // --- signaling event handlers ---------------------------------------------
 
   private handleWelcome(you: Participant, existing: Participant[]): void {

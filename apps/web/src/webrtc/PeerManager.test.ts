@@ -30,8 +30,22 @@ class FakeRTCPeerConnection {
     FakeRTCPeerConnection.instances.push(this);
   }
 
-  addTrack(track: unknown, _stream: MediaStream): void {
+  senders: { track: any; replaceTrack: (t: any) => Promise<void> }[] = [];
+
+  addTrack(track: unknown, _stream: MediaStream) {
     this.localTracks.push(track);
+    const sender = {
+      track: track as any,
+      replaceTrack: async (t: any) => {
+        sender.track = t;
+      },
+    };
+    this.senders.push(sender);
+    return sender;
+  }
+
+  getSenders() {
+    return this.senders;
   }
 
   async createOffer(): Promise<RTCSessionDescriptionInit> {
@@ -100,8 +114,10 @@ async function joinRoom(roomId: string, name: string): Promise<{ participantId: 
   return res.json();
 }
 
+const fakeMicTrack = { kind: "audio", id: "mic-1" };
+
 function fakeLocalStream(): MediaStream {
-  return { getTracks: () => [] } as unknown as MediaStream;
+  return { getTracks: () => [fakeMicTrack] } as unknown as MediaStream;
 }
 
 function assert(cond: boolean, msg: string): void {
@@ -183,7 +199,23 @@ async function run(): Promise<void> {
 
   console.log("\n✅ All PeerManager orchestration assertions passed (offer initiated by existing peer, answer/ICE routed correctly, remote stream + participant list updates fired on both sides)");
 
+  // --- Live mic switch --------------------------------------------------
+  const allSenders = FakeRTCPeerConnection.instances.flatMap((i) => i.senders);
+  assert(allSenders.length === 2 && allSenders.every((x) => x.track.id === "mic-1"), "every sender starts on mic-1");
+
+  const newMic = { kind: "audio", id: "mic-2" } as unknown as MediaStreamTrack;
+  await pmA.replaceAudioTrack(newMic);
+
+  const onNew = allSenders.filter((x) => x.track.id === "mic-2");
+  const onOld = allSenders.filter((x) => x.track.id === "mic-1");
+  assert(onNew.length === 1, "A's peer connection switched to the new mic");
+  assert(onOld.length === 1, "B's own sender was left alone (only the caller's tracks change)");
+  assert(FakeRTCPeerConnection.instances.length === 2, "switching mic created no new peer connections (no renegotiation)");
+
   pmA.stop();
+  await pmA.replaceAudioTrack(newMic); // must be a harmless no-op with zero peers
+  console.log("✅ Mic switch: senders swapped in place, no new connections, no-op when room is empty");
+
   pmB.stop();
   process.exit(0);
 }

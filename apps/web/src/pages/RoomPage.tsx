@@ -1,15 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { joinRoom, type JoinRoomResponse } from "../api/roomsApi";
+import { useAudioInputs } from "../hooks/useAudioInputs";
 import { useLocalStream } from "../hooks/useLocalStream";
 import { useMicControl } from "../hooks/useMicControl";
 import { usePeerManager } from "../hooks/usePeerManager";
-import { ParticipantGrid } from "../components/ParticipantGrid";
-import { MicButton } from "../components/MicButton";
-import { NetworkPanel } from "../components/NetworkPanel";
-import { SettingsPanel } from "../components/SettingsPanel";
-import { formatRoomCode, copyToClipboard } from "../utils/format";
-import type { ConnectionStats } from "../webrtc/ConnectionMonitor";
+import { RoomView } from "../components/RoomView";
+import { copyToClipboard } from "../utils/format";
 
 export function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -17,11 +14,14 @@ export function RoomPage() {
 
   const [identity, setIdentity] = useState<JoinRoomResponse | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
+  const [micSwitchError, setMicSwitchError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [volume, setVolume] = useState(1);
 
-  const { stream, error: micError, isLoading: micLoading } = useLocalStream();
-  const mic = useMicControl(stream);
+  const { stream, track, activeDeviceId, error: micError, isLoading: micLoading, openInput, commitTrack } =
+    useLocalStream();
+  const mic = useMicControl(track);
+  const devices = useAudioInputs(stream !== null);
 
   // Join (HTTP) only once the mic is granted, so the 60s join-token clock
   // doesn't run out while the permission prompt is still showing.
@@ -40,12 +40,34 @@ export function RoomPage() {
     };
   }, [roomId, stream]);
 
-  const { participants, remoteStreams, connectionStats, error: peerError } = usePeerManager({
+  const {
+    participants,
+    remoteStreams,
+    connectionStats,
+    error: peerError,
+    replaceAudioTrack,
+  } = usePeerManager({
     roomId: roomId ?? "",
     participantId: identity?.participantId ?? "",
     token: identity?.token ?? "",
     localStream: stream,
   });
+
+  /** Manual mic switch: open the new device, hand it to every peer, then retire the old track. */
+  async function handleSelectMic(deviceId: string) {
+    if (deviceId === activeDeviceId) return;
+    setMicSwitchError(null);
+    let newTrack: MediaStreamTrack | null = null;
+    try {
+      newTrack = await openInput(deviceId);
+      newTrack.enabled = mic.isTransmitting; // switching while muted must not leak audio
+      await replaceAudioTrack(newTrack);
+      commitTrack(newTrack);
+    } catch {
+      newTrack?.stop();
+      setMicSwitchError("Couldn't switch to that microphone. It may be in use or unavailable.");
+    }
+  }
 
   async function handleCopyInvite() {
     if (!roomId) return;
@@ -61,7 +83,9 @@ export function RoomPage() {
       <Centered>
         <p>🎙️ Couldn't access your microphone.</p>
         <p className="muted small">{micError}</p>
-        <button className="btn btn-secondary" onClick={() => navigate("/")}>Back home</button>
+        <button className="btn btn-secondary" onClick={() => navigate("/")}>
+          Back home
+        </button>
       </Centered>
     );
   }
@@ -70,7 +94,9 @@ export function RoomPage() {
     return (
       <Centered>
         <p>{joinError}</p>
-        <button className="btn btn-secondary" onClick={() => navigate("/")}>Back home</button>
+        <button className="btn btn-secondary" onClick={() => navigate("/")}>
+          Back home
+        </button>
       </Centered>
     );
   }
@@ -79,59 +105,22 @@ export function RoomPage() {
     return <Centered>Connecting…</Centered>;
   }
 
-  // Stats entries outlive a peer that left (the hook never prunes them), so
-  // only summarise peers who are actually still in the room.
-  const peerStats = participants
-    .filter((p) => p.id !== identity.participantId)
-    .map((p) => connectionStats.get(p.id))
-    .filter((s): s is ConnectionStats => s !== undefined);
-
   return (
-    <div className="room">
-      <header className="room-header">
-        <div>
-          <h2>Room {formatRoomCode(roomId ?? "")}</h2>
-          <button className="link-btn" onClick={handleCopyInvite}>
-            {copied ? "Link copied!" : "Copy invite link"}
-          </button>
-        </div>
-        <button className="leave-btn" onClick={() => navigate("/")}>Leave</button>
-      </header>
-
-      {peerError && <p className="error">{peerError.message}</p>}
-
-      <div className="room-body">
-        <section className="room-main">
-          <ParticipantGrid
-            participants={participants}
-            localParticipantId={identity.participantId}
-            remoteStreams={remoteStreams}
-            connectionStats={connectionStats}
-            volume={volume}
-            localMicLive={mic.isTransmitting}
-          />
-          <div className="controls">
-            <MicButton
-              isMuted={mic.isMuted}
-              onToggle={mic.toggleMute}
-              pushToTalk={mic.pushToTalk}
-              isHolding={mic.isHolding}
-              onHoldChange={mic.setIsHolding}
-            />
-          </div>
-        </section>
-
-        <aside className="room-side">
-          <NetworkPanel stats={peerStats} />
-          <SettingsPanel
-            pushToTalk={mic.pushToTalk}
-            onPushToTalkChange={mic.setPushToTalk}
-            volume={volume}
-            onVolumeChange={setVolume}
-          />
-        </aside>
-      </div>
-    </div>
+    <RoomView
+      roomId={roomId ?? ""}
+      localParticipantId={identity.participantId}
+      participants={participants}
+      remoteStreams={remoteStreams}
+      connectionStats={connectionStats}
+      peerError={peerError?.message ?? null}
+      copied={copied}
+      onCopyInvite={handleCopyInvite}
+      onLeave={() => navigate("/")}
+      mic={mic}
+      micInput={{ devices, activeDeviceId, track, error: micSwitchError, onSelect: handleSelectMic }}
+      volume={volume}
+      onVolumeChange={setVolume}
+    />
   );
 }
 

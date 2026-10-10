@@ -21,18 +21,17 @@ export interface UseMicControlResult {
  * Toggling `track.enabled` silences the track without renegotiating any
  * peer connection, so it takes effect instantly for everyone in the room.
  */
-export function useMicControl(stream: MediaStream | null): UseMicControlResult {
+export function useMicControl(track: MediaStreamTrack | null): UseMicControlResult {
   const [isMuted, setIsMuted] = useState(false);
   const [pushToTalk, setPushToTalk] = useState(false);
   const [isHolding, setIsHolding] = useState(false);
 
   const isTransmitting = pushToTalk ? isHolding : !isMuted;
 
+  // Applies to whichever mic track is active, including right after a mic switch.
   useEffect(() => {
-    stream?.getAudioTracks().forEach((track) => {
-      track.enabled = isTransmitting;
-    });
-  }, [stream, isTransmitting]);
+    if (track) track.enabled = isTransmitting;
+  }, [track, isTransmitting]);
 
   useEffect(() => {
     if (!pushToTalk) return;

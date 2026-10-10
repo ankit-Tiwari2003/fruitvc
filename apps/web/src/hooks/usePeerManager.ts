@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PeerManager } from "../webrtc/PeerManager";
 import type { ConnectionStats } from "../webrtc/ConnectionMonitor";
 import type { Participant } from "../../../../packages/shared/src/protocol";
@@ -16,6 +16,8 @@ export interface UsePeerManagerResult {
   remoteStreams: Map<string, MediaStream>;
   connectionStats: Map<string, ConnectionStats>;
   error: { code: string; message: string } | null;
+  /** Swaps the outgoing mic track on every peer connection, no renegotiation. */
+  replaceAudioTrack: (track: MediaStreamTrack) => Promise<void>;
 }
 
 /**
@@ -63,5 +65,9 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only re-run if the stream or identity actually changes
   }, [opts.localStream, opts.roomId, opts.participantId, opts.token]);
 
-  return { participants, remoteStreams, connectionStats, error };
+  const replaceAudioTrack = useCallback(async (track: MediaStreamTrack) => {
+    await managerRef.current?.replaceAudioTrack(track);
+  }, []);
+
+  return { participants, remoteStreams, connectionStats, error, replaceAudioTrack };
 }
