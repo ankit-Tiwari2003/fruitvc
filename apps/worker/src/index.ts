@@ -10,10 +10,15 @@ export interface Env extends TurnEnv {
   ROOM: DurableObjectNamespace;
   ALLOWED_ORIGIN: string; // set via wrangler.jsonc vars, e.g. "https://fruitvc.pages.dev"
   RATE_LIMIT: KVNamespace; // simple token-bucket-ish counters for abuse prevention, also used for TURN usage tracking
+  JOIN_RATE_LIMIT?: string; // optional override of the per-IP create/join limit (used by tests)
 }
 
 const MAX_ROOM_CREATE_ATTEMPTS = 5; // collision retries before giving up
 const JOIN_RATE_LIMIT_PER_MINUTE = 20; // per IP, matches spec section 38
+
+function joinRateLimit(env: Env): number {
+  return Number(env.JOIN_RATE_LIMIT) || JOIN_RATE_LIMIT_PER_MINUTE;
+}
 
 function getClientIp(request: Request): string {
   return request.headers.get("CF-Connecting-IP") ?? "unknown";
@@ -64,7 +69,7 @@ export default {
     // POST /api/rooms — create a new room, retrying on code collision.
     if (url.pathname === "/api/rooms" && request.method === "POST") {
       const ip = getClientIp(request);
-      if (await isRateLimited(env, `create:${ip}`, JOIN_RATE_LIMIT_PER_MINUTE)) {
+      if (await isRateLimited(env, `create:${ip}`, joinRateLimit(env))) {
         return cors(env, jsonResponse({ error: "rate_limited" }, { status: 429 }));
       }
 
@@ -103,7 +108,7 @@ export default {
         return cors(env, jsonResponse({ error: "invalid_room_code" }, { status: 400 }));
       }
       const ip = getClientIp(request);
-      if (await isRateLimited(env, `join:${ip}`, JOIN_RATE_LIMIT_PER_MINUTE)) {
+      if (await isRateLimited(env, `join:${ip}`, joinRateLimit(env))) {
         return cors(env, jsonResponse({ error: "rate_limited" }, { status: 429 }));
       }
 

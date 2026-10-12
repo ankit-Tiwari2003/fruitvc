@@ -86,7 +86,21 @@ export type ServerSignalMessage =
 export const ROOM_LIMITS = {
   MAX_PARTICIPANTS: 15,
   MAX_MESSAGE_BYTES: 8 * 1024, // 8 KB — plenty for SDP/ICE, blocks abuse
-  INACTIVITY_TIMEOUT_MS: 30 * 60 * 1000, // 30 minutes
+  INACTIVITY_TIMEOUT_MS: 30 * 60 * 1000, // a room nobody ever joined expires after this
+  EMPTY_ROOM_GRACE_MS: 60 * 1000, // an emptied room is deleted after this
+} as const;
+
+// Liveness checking. Clients send the text frame "ping" and the Durable Object
+// answers "pong" via the runtime's auto-response (no wake-up, no billed request).
+// The server uses the last-pong timestamp to evict connections that vanished
+// without a close (phone lost signal, laptop slept), which would otherwise
+// linger as ghost participants.
+export const HEARTBEAT = {
+  INTERVAL_MS: 15_000, // how often clients ping (web client keeps its own copy of this)
+  // Generous on purpose: browsers throttle timers in background tabs, and the
+  // whole point of this app is to sit in a background tab while you game.
+  TIMEOUT_MS: 120_000,
+  SWEEP_INTERVAL_MS: 20_000, // how often the server checks for silent connections
 } as const;
 
 // --- TURN provider fallback chain -------------------------------------------

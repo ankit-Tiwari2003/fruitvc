@@ -108,6 +108,8 @@ export class ConnectionMonitor {
       return; // connection likely closed; next stop() call will clean up
     }
 
+    if (this.stopped) return; // stopped while getStats() was in flight — don't resurrect stale stats
+
     let roundTripTimeMs: number | null = null;
     let packetsLost = 0;
     let jitterMs: number | null = null;

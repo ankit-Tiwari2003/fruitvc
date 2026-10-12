@@ -9,12 +9,16 @@ import type {
  * a room's Durable Object. Responsible ONLY for:
  *   - connecting with the join token
  *   - sending/receiving typed signaling messages
- *   - surfacing connection lifecycle events
+ *   - noticing when the connection is gone (closed OR silently dead)
  *
- * It knows nothing about WebRTC itself (no RTCPeerConnection here) — that's
- * PeerManager's job. This separation is what let us test the signaling
- * backend (Part 1) completely independently of any WebRTC code at all.
+ * It knows nothing about WebRTC (no RTCPeerConnection here) — that's
+ * PeerManager's job.
  */
+
+// Local copies on purpose: the web build must not depend at runtime on files
+// outside apps/web. Keep in sync with HEARTBEAT in packages/shared.
+const PING_INTERVAL_MS = 15_000;
+const PONG_TIMEOUT_MS = 10_000;
 
 export interface SignalingClientEvents {
   onWelcome?: (you: Participant, existingParticipants: Participant[]) => void;
@@ -24,6 +28,7 @@ export interface SignalingClientEvents {
   onAnswer?: (from: string, sdp: RTCSessionDescriptionInit) => void;
   onIceCandidate?: (from: string, candidate: RTCIceCandidateInit) => void;
   onError?: (code: string, message: string) => void;
+  /** Fires once if the connection ends for any reason other than close(). */
   onClose?: () => void;
 }
 
@@ -39,6 +44,11 @@ export class SignalingClient {
   private ws: WebSocket | null = null;
   private opts: SignalingClientOptions;
   private manuallyClosed = false;
+  private notifiedClosed = false;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pongTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True once the server has answered a ping. Older Workers never do. */
+  private heartbeatConfirmed = false;
 
   constructor(options: SignalingClientOptions) {
     this.opts = options;
@@ -50,9 +60,19 @@ export class SignalingClient {
       participantId
     )}&token=${encodeURIComponent(token)}`;
 
-    this.ws = new WebSocket(url);
+    const ws = new WebSocket(url);
+    this.ws = ws;
 
-    this.ws.onmessage = (event) => {
+    ws.onopen = () => {
+      this.ping();
+      this.pingTimer = setInterval(() => this.ping(), PING_INTERVAL_MS);
+    };
+
+    ws.onmessage = (event) => {
+      if (event.data === "pong") {
+        this.onPong();
+        return;
+      }
       let msg: ServerSignalMessage;
       try {
         msg = JSON.parse(event.data as string);
@@ -62,17 +82,70 @@ export class SignalingClient {
       this.dispatch(msg);
     };
 
-    this.ws.onclose = () => {
-      if (!this.manuallyClosed) {
-        this.opts.events.onClose?.();
-      }
-    };
+    ws.onclose = () => this.handleClosed();
 
-    this.ws.onerror = () => {
-      // The browser gives no useful detail on WebSocket errors; onclose
-      // will fire right after this with whatever info is available.
+    ws.onerror = () => {
+      // Browsers give no useful detail on WebSocket errors; onclose follows.
     };
   }
+
+  // --- liveness -------------------------------------------------------------
+
+  /**
+   * A phone that loses signal or a laptop that sleeps often never sends a
+   * TCP close, so the socket just sits there "open" for minutes. Pinging lets
+   * us notice within ~10s and reconnect.
+   */
+  private ping(): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send("ping");
+    } catch {
+      return;
+    }
+    if (this.pongTimer) return; // one outstanding ping at a time
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = null;
+      if (!this.heartbeatConfirmed) {
+        // The server never answered a ping: it's an older Worker that doesn't
+        // know the heartbeat. Stop pinging instead of dropping a healthy socket.
+        this.stopHeartbeat();
+        return;
+      }
+      // It answered before and has now gone quiet: the connection is dead.
+      this.handleClosed();
+      try {
+        this.ws?.close();
+      } catch {
+        // already closed
+      }
+    }, PONG_TIMEOUT_MS);
+  }
+
+  private onPong(): void {
+    this.heartbeatConfirmed = true;
+    if (this.pongTimer) {
+      clearTimeout(this.pongTimer);
+      this.pongTimer = null;
+    }
+  }
+
+  private stopHeartbeat(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    if (this.pongTimer) clearTimeout(this.pongTimer);
+    this.pingTimer = null;
+    this.pongTimer = null;
+  }
+
+  private handleClosed(): void {
+    this.stopHeartbeat();
+    if (this.manuallyClosed || this.notifiedClosed) return;
+    this.notifiedClosed = true;
+    this.opts.events.onClose?.();
+  }
+
+  // --- messages -------------------------------------------------------------
 
   private dispatch(msg: ServerSignalMessage): void {
     const ev = this.opts.events;
@@ -96,6 +169,8 @@ export class SignalingClient {
         ev.onIceCandidate?.(msg.from, msg.candidate as RTCIceCandidateInit);
         return;
       case "error":
+        // An older Worker answers our "ping" with a bad_json error. Harmless.
+        if (msg.code === "bad_json") return;
         ev.onError?.(msg.code, msg.message);
         return;
     }
@@ -103,9 +178,6 @@ export class SignalingClient {
 
   private send(msg: ClientSignalMessage): void {
     if (this.ws?.readyState !== WebSocket.OPEN) {
-      // Signaling messages are only ever sent in direct response to WebRTC
-      // negotiation events, which shouldn't happen before the socket is
-      // open — if this fires, something upstream called us too early.
       console.warn("SignalingClient: attempted to send before socket open", msg.type);
       return;
     }
@@ -126,6 +198,7 @@ export class SignalingClient {
 
   close(): void {
     this.manuallyClosed = true;
+    this.stopHeartbeat();
     this.ws?.close();
     this.ws = null;
   }

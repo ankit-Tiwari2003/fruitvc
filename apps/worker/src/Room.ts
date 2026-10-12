@@ -3,11 +3,14 @@ import type {
   ServerSignalMessage,
   Participant,
 } from "../../../packages/shared/src/protocol";
-import { ROOM_LIMITS } from "../../../packages/shared/src/protocol";
-import { generateParticipantId, generateParticipantName, generateToken } from "./utils";
+import { ROOM_LIMITS, HEARTBEAT } from "../../../packages/shared/src/protocol";
+import { generateParticipantId, generateToken, generateUniqueParticipantName } from "./utils";
 
 export interface Env {
   ROOM: DurableObjectNamespace;
+  /** Optional overrides (wrangler vars are strings). Defaults come from HEARTBEAT in the shared protocol. */
+  HEARTBEAT_TIMEOUT_MS?: string;
+  HEARTBEAT_SWEEP_MS?: string;
 }
 
 interface RoomMeta {
@@ -21,165 +24,148 @@ interface PendingJoin {
   expiresAt: number;
 }
 
+const PENDING_PREFIX = "pending:";
+const PENDING_TTL_MS = 60_000;
+
+const json = (data: unknown, status = 200): Response =>
+  new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+
 /**
  * RoomDurableObject — one instance per room code.
  *
  * Responsibilities (and ONLY these):
- *   - track connected participants
- *   - forward signaling messages (offer/answer/ice-candidate) between them
- *   - clean itself up when empty
+ *   - decide who is in the room (join slots, cap, unique names)
+ *   - forward signaling messages (offer/answer/ice-candidate) between members
+ *   - notice members that vanished and tell everyone else
+ *   - delete itself when empty
  *
- * This class never sees audio. WebRTC media flows directly between browsers
- * (or via Cloudflare TURN), completely outside this object's awareness.
+ * It never sees audio. WebRTC media flows browser-to-browser (or via TURN).
  *
- * Uses the WebSocket Hibernation API (state.acceptWebSocket) so idle rooms
- * don't hold the DO in memory / cost wall-clock CPU time while participants
- * are just sitting there connected but not sending signaling traffic.
+ * Uses the WebSocket Hibernation API, so anything kept only in memory is lost
+ * whenever the object is evicted. Therefore everything that must survive
+ * (participants, pending join tokens) lives in storage.
  */
 export class RoomDurableObject implements DurableObject {
   private state: DurableObjectState;
-  // Reserved for future use (e.g. TURN credential secrets passed to this DO).
-  // Referenced via `void` below purely to satisfy noUnusedLocals until then.
-  private env: Env;
-
-  // participantId -> Participant metadata. Rehydrated from storage after hibernation.
-  private participants: Map<string, Participant> = new Map();
-
-  // Short-lived tokens issued by POST /join, redeemed once on WebSocket connect.
-  private pendingJoins: Map<string, PendingJoin> = new Map();
+  private participants: Map<string, Participant> = new Map(); // cache of storage
+  private timeoutMs: number;
+  private sweepMs: number;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
-    this.env = env;
-    void this.env;
+    this.timeoutMs = Number(env.HEARTBEAT_TIMEOUT_MS) || HEARTBEAT.TIMEOUT_MS;
+    this.sweepMs = Number(env.HEARTBEAT_SWEEP_MS) || HEARTBEAT.SWEEP_INTERVAL_MS;
+    // Answered by the runtime itself, without waking this object.
+    state.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
   }
 
-  private async getMeta(): Promise<RoomMeta> {
-    const meta = await this.state.storage.get<RoomMeta>("meta");
-    if (meta) return meta;
-    const fresh: RoomMeta = { createdAt: Date.now(), lastActivityAt: Date.now() };
-    await this.state.storage.put("meta", fresh);
-    return fresh;
-  }
-
-  private async touch(): Promise<void> {
-    const meta = await this.getMeta();
-    meta.lastActivityAt = Date.now();
-    await this.state.storage.put("meta", meta);
-    // Re-arm the cleanup alarm every time there's activity.
-    await this.state.storage.setAlarm(Date.now() + ROOM_LIMITS.INACTIVITY_TIMEOUT_MS);
-  }
+  // --- storage helpers -------------------------------------------------------
 
   private async loadParticipants(): Promise<void> {
     if (this.participants.size > 0) return;
     const stored = await this.state.storage.get<Record<string, Participant>>("participants");
-    if (stored) {
-      this.participants = new Map(Object.entries(stored));
-    }
+    if (stored) this.participants = new Map(Object.entries(stored));
   }
 
   private async saveParticipants(): Promise<void> {
-    await this.state.storage.put(
-      "participants",
-      Object.fromEntries(this.participants.entries())
-    );
+    await this.state.storage.put("participants", Object.fromEntries(this.participants.entries()));
   }
+
+  /** Unexpired pending joins (slots reserved by POST /join but not yet connected). */
+  private async loadPending(): Promise<Map<string, PendingJoin>> {
+    const all = await this.state.storage.list<PendingJoin>({ prefix: PENDING_PREFIX });
+    const now = Date.now();
+    const live = new Map<string, PendingJoin>();
+    const expired: string[] = [];
+    for (const [key, value] of all) {
+      if (value.expiresAt < now) expired.push(key);
+      else live.set(key.slice(PENDING_PREFIX.length), value);
+    }
+    if (expired.length) await this.state.storage.delete(expired);
+    return live;
+  }
+
+  /** Recorded on join/leave only — never per message. */
+  private async markActivity(): Promise<void> {
+    const meta = await this.state.storage.get<RoomMeta>("meta");
+    if (!meta) return;
+    meta.lastActivityAt = Date.now();
+    await this.state.storage.put("meta", meta);
+  }
+
+  /** Ensures a sweep alarm is scheduled soon, without pushing back an earlier one. */
+  private async armSweep(): Promise<void> {
+    const next = Date.now() + this.sweepMs;
+    const current = await this.state.storage.getAlarm();
+    if (current === null || current > next) await this.state.storage.setAlarm(next);
+  }
+
+  // --- HTTP entry points -----------------------------------------------------
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
-    // Internal call from the Worker's POST /api/rooms — atomically claims
-    // this DO as a brand-new room, or reports that it's already taken.
-    // Used purely for room-code collision detection at creation time.
-    if (url.pathname === "/internal/claim" && request.method === "POST") {
-      return this.handleClaim();
-    }
-
-    // Internal call from the Worker's POST /api/rooms/:id/join
-    if (url.pathname === "/internal/register-join" && request.method === "POST") {
-      return this.handleRegisterJoin(request);
-    }
-
-    if (url.pathname === "/internal/info" && request.method === "GET") {
-      return this.handleInfo();
-    }
-
-    // WebSocket upgrade for actual signaling
-    if (request.headers.get("Upgrade") === "websocket") {
-      return this.handleWebSocketUpgrade(request);
-    }
+    if (url.pathname === "/internal/claim" && request.method === "POST") return this.handleClaim();
+    if (url.pathname === "/internal/register-join" && request.method === "POST") return this.handleRegisterJoin(request);
+    if (url.pathname === "/internal/info" && request.method === "GET") return this.handleInfo();
+    if (request.headers.get("Upgrade") === "websocket") return this.handleWebSocketUpgrade(request);
 
     return new Response("Not found", { status: 404 });
   }
 
   /**
-   * Called by the Worker when a participant successfully POSTs /join.
-   * Reserves a slot, generates identity + token, but does NOT open the
-   * WebSocket yet — the browser does that next with the returned token.
-   */
-  private async handleRegisterJoin(request: Request): Promise<Response> {
-    await this.loadParticipants();
-
-    if (this.participants.size >= ROOM_LIMITS.MAX_PARTICIPANTS) {
-      return new Response(JSON.stringify({ error: "room_full" }), {
-        status: 403,
-        headers: { "content-type": "application/json" },
-      });
-    }
-
-    const body = (await request.json().catch(() => ({}))) as { name?: string };
-    const participantId = generateParticipantId();
-    const name = body.name?.slice(0, 32) || generateParticipantName();
-    const token = generateToken();
-
-    // Token is valid for 60s — just long enough for the browser to open
-    // the WebSocket right after receiving the join response.
-    this.pendingJoins.set(participantId, {
-      token,
-      name,
-      expiresAt: Date.now() + 60_000,
-    });
-
-    await this.touch();
-
-    return new Response(
-      JSON.stringify({ participantId, name, token }),
-      { headers: { "content-type": "application/json" } }
-    );
-  }
-
-  /**
-   * Claims this Durable Object instance as a new room, iff it hasn't already
-   * been claimed. This is how the Worker checks for room-code collisions:
-   * DOs are lazily created on first access, so "does this code already
-   * exist" has to be answered by checking our own storage, not by whether
-   * the DO object itself exists.
+   * Claims this Durable Object as a brand-new room iff it hasn't been claimed.
+   * DOs are created lazily on first access, so "does this room exist" must be
+   * answered by our own storage, not by whether the object exists.
    */
   private async handleClaim(): Promise<Response> {
     const existing = await this.state.storage.get<RoomMeta>("meta");
-    if (existing) {
-      return new Response(JSON.stringify({ claimed: false }), {
-        headers: { "content-type": "application/json" },
-      });
-    }
-    await this.getMeta(); // creates and persists meta, claiming this room code
-    await this.state.storage.setAlarm(Date.now() + ROOM_LIMITS.INACTIVITY_TIMEOUT_MS);
-    return new Response(JSON.stringify({ claimed: true }), {
-      headers: { "content-type": "application/json" },
-    });
+    if (existing) return json({ claimed: false });
+    const now = Date.now();
+    await this.state.storage.put("meta", { createdAt: now, lastActivityAt: now } satisfies RoomMeta);
+    // A room nobody ever joins expires on its own.
+    await this.state.storage.setAlarm(now + ROOM_LIMITS.INACTIVITY_TIMEOUT_MS);
+    return json({ claimed: true });
   }
 
   private async handleInfo(): Promise<Response> {
+    const meta = await this.state.storage.get<RoomMeta>("meta");
+    if (!meta) return json({ exists: false, participantCount: 0, createdAt: null });
     await this.loadParticipants();
-    const meta = await this.getMeta();
-    return new Response(
-      JSON.stringify({
-        exists: true,
-        participantCount: this.participants.size,
-        createdAt: meta.createdAt,
-      }),
-      { headers: { "content-type": "application/json" } }
-    );
+    return json({ exists: true, participantCount: this.participants.size, createdAt: meta.createdAt });
+  }
+
+  /** Reserves a slot and issues a one-time token. The browser then opens the WebSocket with it. */
+  private async handleRegisterJoin(request: Request): Promise<Response> {
+    const meta = await this.state.storage.get<RoomMeta>("meta");
+    if (!meta) return json({ error: "room_not_found" }, 404);
+
+    await this.loadParticipants();
+    const pending = await this.loadPending();
+
+    // Reserved-but-not-yet-connected slots count too, otherwise a burst of
+    // simultaneous joins could all pass this check and overfill the room.
+    if (this.participants.size + pending.size >= ROOM_LIMITS.MAX_PARTICIPANTS) {
+      return json({ error: "room_full" }, 403);
+    }
+
+    const body = (await request.json().catch(() => ({}))) as { name?: string };
+    const taken = new Set<string>([
+      ...[...this.participants.values()].map((p) => p.name),
+      ...[...pending.values()].map((p) => p.name),
+    ]);
+    const requested = body.name?.trim().slice(0, 32);
+    const name = requested && !taken.has(requested) ? requested : generateUniqueParticipantName(taken);
+
+    const participantId = generateParticipantId();
+    const token = generateToken();
+    await this.state.storage.put(PENDING_PREFIX + participantId, {
+      token,
+      name,
+      expiresAt: Date.now() + PENDING_TTL_MS,
+    } satisfies PendingJoin);
+
+    return json({ participantId, name, token });
   }
 
   private async handleWebSocketUpgrade(request: Request): Promise<Response> {
@@ -187,44 +173,36 @@ export class RoomDurableObject implements DurableObject {
     const participantId = url.searchParams.get("participantId") ?? "";
     const token = url.searchParams.get("token") ?? "";
 
-    const pending = this.pendingJoins.get(participantId);
+    const key = PENDING_PREFIX + participantId;
+    const pending = participantId ? await this.state.storage.get<PendingJoin>(key) : undefined;
     if (!pending || pending.token !== token || pending.expiresAt < Date.now()) {
       return new Response("Unauthorized", { status: 401 });
     }
-    this.pendingJoins.delete(participantId);
+    await this.state.storage.delete(key); // single use
 
     await this.loadParticipants();
+    if (this.participants.size >= ROOM_LIMITS.MAX_PARTICIPANTS) {
+      return new Response("Room full", { status: 403 });
+    }
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
 
-    // Hibernation API: the DO can be evicted from memory between messages
-    // and Cloudflare will wake it back up when a message arrives on this
-    // socket. We attach participant identity as serialized tags so we can
-    // recover "who is this" after a wake-up.
+    // Hibernation API: identity is stored as tags so it survives eviction.
     this.state.acceptWebSocket(server, [participantId, pending.name]);
 
-    const participant: Participant = {
-      id: participantId,
-      name: pending.name,
-      joinedAt: Date.now(),
-    };
+    const participant: Participant = { id: participantId, name: pending.name, joinedAt: Date.now() };
     this.participants.set(participantId, participant);
     await this.saveParticipants();
-    await this.touch();
+    await this.markActivity();
+    await this.armSweep();
 
-    // Tell the new participant who's already here.
     this.sendTo(server, {
       type: "welcome",
       you: participant,
       participants: [...this.participants.values()].filter((p) => p.id !== participantId),
     });
-
-    // Tell everyone else the new participant arrived.
-    this.broadcast(
-      { type: "participant-joined", participantId, name: pending.name },
-      participantId
-    );
+    this.broadcast({ type: "participant-joined", participantId, name: pending.name }, participantId);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -232,7 +210,13 @@ export class RoomDurableObject implements DurableObject {
   // --- Hibernation API callbacks -------------------------------------------
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
-    if (typeof message !== "string") return; // we only expect JSON text frames
+    if (typeof message !== "string") return; // we only expect text frames
+
+    // Normally answered by the runtime's auto-response and never reaches here.
+    if (message === "ping") {
+      ws.send("pong");
+      return;
+    }
 
     if (message.length > ROOM_LIMITS.MAX_MESSAGE_BYTES) {
       this.sendTo(ws, { type: "error", code: "message_too_large", message: "Message too large" });
@@ -247,17 +231,14 @@ export class RoomDurableObject implements DurableObject {
       return;
     }
 
-    await this.loadParticipants();
     const [senderId] = this.state.getTags(ws);
-    await this.touch();
 
     // Pure forwarding. No inspection of SDP/ICE contents beyond routing fields.
     switch (parsed.type) {
       case "offer":
       case "answer":
       case "ice-candidate": {
-        // Enforce that `from` matches the authenticated socket — never trust
-        // the client's claimed identity for routing.
+        // Never trust the client's claimed identity for routing.
         if (parsed.from !== senderId) {
           this.sendTo(ws, { type: "error", code: "identity_mismatch", message: "from must match your participant id" });
           return;
@@ -275,51 +256,76 @@ export class RoomDurableObject implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket): Promise<void> {
+  async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
     await this.handleDisconnect(ws);
+    // Complete the closing handshake. Without this the client's socket stays in
+    // CLOSING forever and its `close` event never fires, so it can't tell the
+    // connection is gone.
+    try {
+      ws.close(code, reason);
+    } catch {
+      try {
+        ws.close();
+      } catch {
+        // already closed
+      }
+    }
   }
 
   async webSocketError(ws: WebSocket): Promise<void> {
     await this.handleDisconnect(ws);
   }
 
+  /** Idempotent: the sweep and the close event can both report the same member. */
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     await this.loadParticipants();
     const [participantId] = this.state.getTags(ws);
-    if (!participantId) return;
+    if (!participantId || !this.participants.has(participantId)) return;
 
     this.participants.delete(participantId);
     await this.saveParticipants();
-    await this.touch();
-
+    await this.markActivity();
     this.broadcast({ type: "participant-left", participantId });
 
     if (this.participants.size === 0) {
-      // No inactivity wait needed once the room is empty — clean up on next alarm tick,
-      // but also shrink the alarm so an empty room doesn't linger for the full 30 minutes.
-      await this.state.storage.setAlarm(Date.now() + 60_000);
+      await this.state.storage.setAlarm(Date.now() + ROOM_LIMITS.EMPTY_ROOM_GRACE_MS);
     }
   }
 
-  /** Cleanup: fires when the inactivity timeout elapses with no renewed activity. */
+  /**
+   * Fires in two situations:
+   *  - periodically while members are present: evict connections that stopped
+   *    answering pings (clients that never ping — older builds — are left alone)
+   *  - once a room has been empty (or was never joined) long enough: delete it
+   */
   async alarm(): Promise<void> {
     await this.loadParticipants();
-    if (this.participants.size === 0) {
-      await this.state.storage.deleteAll();
-      this.participants.clear();
+    const now = Date.now();
+
+    for (const ws of this.state.getWebSockets()) {
+      const lastPong = this.state.getWebSocketAutoResponseTimestamp(ws);
+      if (lastPong && now - lastPong.getTime() > this.timeoutMs) {
+        await this.handleDisconnect(ws);
+        try {
+          ws.close(1001, "heartbeat timeout");
+        } catch {
+          // already closed
+        }
+      }
+    }
+
+    if (this.participants.size > 0) {
+      await this.state.storage.setAlarm(now + this.sweepMs);
       return;
     }
-    // Still occupied somehow (e.g. sockets alive without recent messages) —
-    // just re-check later rather than evicting active participants.
-    await this.state.storage.setAlarm(Date.now() + ROOM_LIMITS.INACTIVITY_TIMEOUT_MS);
+    await this.state.storage.deleteAll();
+    this.participants.clear();
   }
 
   // --- helpers ---------------------------------------------------------------
 
   private findSocketByParticipantId(participantId: string): WebSocket | undefined {
-    return this.state
-      .getWebSockets()
-      .find((ws) => this.state.getTags(ws)[0] === participantId);
+    return this.state.getWebSockets().find((ws) => this.state.getTags(ws)[0] === participantId);
   }
 
   private sendTo(ws: WebSocket, message: ServerSignalMessage): void {

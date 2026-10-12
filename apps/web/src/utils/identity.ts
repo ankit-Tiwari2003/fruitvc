@@ -9,6 +9,10 @@ const COLOR_HEX: Record<string, string> = {
   Amber: "#f59e0b",
   Emerald: "#10b981",
   Coral: "#fb7185",
+  Teal: "#14b8a6",
+  Indigo: "#6366f1",
+  Rose: "#f472b6",
+  Mint: "#6ee7b7",
 };
 
 export function participantColor(name: string): string {

@@ -9,6 +9,8 @@ export interface UsePeerManagerOptions {
   participantId: string;
   token: string;
   localStream: MediaStream | null;
+  /** The connection to the room died and everything was torn down — rejoin to resync. */
+  onSignalingLost?: () => void;
 }
 
 export interface UsePeerManagerResult {
@@ -16,8 +18,17 @@ export interface UsePeerManagerResult {
   remoteStreams: Map<string, MediaStream>;
   connectionStats: Map<string, ConnectionStats>;
   error: { code: string; message: string } | null;
+  /** Increments each time the room accepts us and sends the member list. */
+  connectionEpoch: number;
   /** Swaps the outgoing mic track on every peer connection, no renegotiation. */
   replaceAudioTrack: (track: MediaStreamTrack) => Promise<void>;
+}
+
+function without<V>(map: Map<string, V>, key: string): Map<string, V> {
+  if (!map.has(key)) return map;
+  const next = new Map(map);
+  next.delete(key);
+  return next;
 }
 
 /**
@@ -30,13 +41,24 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [connectionStats, setConnectionStats] = useState<Map<string, ConnectionStats>>(new Map());
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
+  const [connectionEpoch, setConnectionEpoch] = useState(0);
 
   const managerRef = useRef<PeerManager | null>(null);
+  const lostRef = useRef(opts.onSignalingLost);
+  useEffect(() => {
+    lostRef.current = opts.onSignalingLost;
+  });
 
   useEffect(() => {
-    // Wait for the mic before starting — PeerManager needs a real stream
-    // to attach tracks to every peer connection it creates.
+    // Wait for the mic AND real credentials before starting.
     if (!opts.localStream || !opts.roomId || !opts.participantId || !opts.token) return;
+
+    // A new connection starts from a clean slate: anything left over from a
+    // previous one (members who have since left, stale stats) must not linger.
+    setParticipants([]);
+    setRemoteStreams(new Map());
+    setConnectionStats(new Map());
+    setError(null);
 
     const manager = new PeerManager({
       apiBaseUrl: getApiBaseUrl(),
@@ -52,6 +74,12 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
       onConnectionStats: (participantId, stats) => {
         setConnectionStats((prev) => new Map(prev).set(participantId, stats));
       },
+      onConnected: () => setConnectionEpoch((n) => n + 1),
+      onPeerRemoved: (participantId) => {
+        setRemoteStreams((prev) => without(prev, participantId));
+        setConnectionStats((prev) => without(prev, participantId));
+      },
+      onSignalingLost: () => lostRef.current?.(),
       onError: (code, message) => setError({ code, message }),
     });
 
@@ -62,12 +90,11 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
       manager.stop();
       managerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally only re-run if the stream or identity actually changes
   }, [opts.localStream, opts.roomId, opts.participantId, opts.token]);
 
   const replaceAudioTrack = useCallback(async (track: MediaStreamTrack) => {
     await managerRef.current?.replaceAudioTrack(track);
   }, []);
 
-  return { participants, remoteStreams, connectionStats, error, replaceAudioTrack };
+  return { participants, remoteStreams, connectionStats, error, connectionEpoch, replaceAudioTrack };
 }

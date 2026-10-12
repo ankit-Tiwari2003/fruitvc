@@ -28,6 +28,15 @@ export interface PeerManagerOptions {
   onRemoteStream?: (participantId: string, stream: MediaStream) => void;
   onParticipantListChanged?: (participants: Participant[]) => void;
   onConnectionStats?: (participantId: string, stats: ConnectionStats) => void;
+  /** The server accepted us and sent the current member list (a successful (re)connect). */
+  onConnected?: () => void;
+  /** A peer connection was torn down (they left, it failed, or we lost signaling). */
+  onPeerRemoved?: (participantId: string) => void;
+  /**
+   * The signaling connection ended (closed, or silently dead per the heartbeat).
+   * Everything has been torn down; the owner should rejoin the room to resync.
+   */
+  onSignalingLost?: () => void;
   onError?: (code: string, message: string) => void;
 }
 
@@ -42,6 +51,7 @@ export class PeerManager {
   private peers = new Map<string, PeerEntry>();
   private knownParticipants = new Map<string, Participant>();
   private iceConfig: IceConfig | null = null;
+  private stopped = false;
 
   constructor(options: PeerManagerOptions) {
     this.opts = options;
@@ -66,11 +76,13 @@ export class PeerManager {
   /** Fetches ICE config, then opens the signaling connection. Call once. */
   async start(): Promise<void> {
     this.iceConfig = await fetchIceConfig(this.opts.apiBaseUrl);
+    if (this.stopped) return; // torn down while the ICE config was loading
     this.signaling.connect();
   }
 
   stop(): void {
-    for (const [id] of this.peers) this.closePeer(id);
+    this.stopped = true; // silences every callback from here on
+    for (const id of [...this.peers.keys()]) this.closePeer(id, false);
     this.signaling.close();
   }
 
@@ -103,6 +115,7 @@ export class PeerManager {
     // Per the spec's initiation rule, the NEW joiner does NOT initiate —
     // it waits for offers from each existing participant.
     this.emitParticipantList();
+    this.opts.onConnected?.();
   }
 
   private handleParticipantJoined(participantId: string, name: string): void {
@@ -145,7 +158,11 @@ export class PeerManager {
   }
 
   private handleSignalingClosed(): void {
-    for (const [id] of this.peers) this.closePeer(id);
+    if (this.stopped) return;
+    // Our view of the room can no longer be trusted (we may have missed joins
+    // and leaves), so drop every connection; the owner rejoins for a clean slate.
+    for (const id of [...this.peers.keys()]) this.closePeer(id);
+    this.opts.onSignalingLost?.();
   }
 
   // --- peer connection lifecycle ---------------------------------------------
@@ -191,7 +208,9 @@ export class PeerManager {
       roomId: this.opts.roomId,
       relayProvider: this.iceConfig?.relayProvider ?? null,
       apiBaseUrl: this.opts.apiBaseUrl,
-      onStats: (stats) => this.opts.onConnectionStats?.(participantId, stats),
+      onStats: (stats) => {
+        if (!this.stopped) this.opts.onConnectionStats?.(participantId, stats);
+      },
     });
     monitor.start();
 
@@ -199,12 +218,13 @@ export class PeerManager {
     return pc;
   }
 
-  private closePeer(participantId: string): void {
+  private closePeer(participantId: string, notify = true): void {
     const entry = this.peers.get(participantId);
     if (!entry) return;
+    this.peers.delete(participantId);
     entry.monitor.stop();
     entry.pc.close();
-    this.peers.delete(participantId);
+    if (notify && !this.stopped) this.opts.onPeerRemoved?.(participantId);
   }
 
   private emitParticipantList(): void {

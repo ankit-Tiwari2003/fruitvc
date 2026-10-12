@@ -50,13 +50,28 @@ export function generateToken(): string {
     .replace(/=+$/, "");
 }
 
-const COLORS = ["Blue", "Silver", "Golden", "Crimson", "Violet", "Amber", "Emerald", "Coral"];
-const FRUITS = ["Mango", "Kiwi", "Papaya", "Lychee", "Guava", "Fig", "Plum", "Melon"];
+// Keep the color words in sync with apps/web/src/utils/identity.ts (tile colors).
+const COLORS = ["Blue", "Silver", "Golden", "Crimson", "Violet", "Amber", "Emerald", "Coral", "Teal", "Indigo", "Rose", "Mint"];
+const FRUITS = ["Mango", "Kiwi", "Papaya", "Lychee", "Guava", "Fig", "Plum", "Melon", "Peach", "Cherry", "Lime", "Apricot"];
+
+const pick = <T>(list: readonly T[]): T => list[Math.floor(Math.random() * list.length)];
 
 export function generateParticipantName(): string {
-  const c = COLORS[Math.floor(Math.random() * COLORS.length)];
-  const f = FRUITS[Math.floor(Math.random() * FRUITS.length)];
-  return `${c} ${f}`;
+  return `${pick(COLORS)} ${pick(FRUITS)}`;
+}
+
+/**
+ * A name nobody else in the room has. Random picks from 144 combinations
+ * collide surprisingly often (15 people: ~50% chance of at least one clash),
+ * so we check against the names already taken.
+ */
+export function generateUniqueParticipantName(taken: ReadonlySet<string>): string {
+  for (let i = 0; i < 40; i++) {
+    const name = generateParticipantName();
+    if (!taken.has(name)) return name;
+  }
+  for (const c of COLORS) for (const f of FRUITS) if (!taken.has(`${c} ${f}`)) return `${c} ${f}`;
+  return `${generateParticipantName()} ${taken.size + 1}`; // unreachable below 144 members
 }
 
 export function jsonResponse(data: unknown, init: ResponseInit = {}): Response {

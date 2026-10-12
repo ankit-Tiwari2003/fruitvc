@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { joinRoom, type JoinRoomResponse } from "../api/roomsApi";
+import { ApiError, joinRoom, type JoinRoomResponse } from "../api/roomsApi";
 import { useAudioInputs } from "../hooks/useAudioInputs";
 import { useLocalStream } from "../hooks/useLocalStream";
 import { useMicControl } from "../hooks/useMicControl";
@@ -8,12 +8,19 @@ import { usePeerManager } from "../hooks/usePeerManager";
 import { RoomView } from "../components/RoomView";
 import { copyToClipboard } from "../utils/format";
 
+const MAX_RECONNECT_ATTEMPTS = 8;
+const retryDelayMs = (attempt: number) => Math.min(1000 * 2 ** (attempt - 1), 8000);
+
 export function RoomPage() {
   const { roomId } = useParams<{ roomId: string }>();
   const navigate = useNavigate();
 
   const [identity, setIdentity] = useState<JoinRoomResponse | null>(null);
-  const [joinError, setJoinError] = useState<string | null>(null);
+  const [fatalError, setFatalError] = useState<string | null>(null);
+  const [reconnecting, setReconnecting] = useState(false);
+  const [joinTick, setJoinTick] = useState(0); // bump to (re)run the join step
+  const failures = useRef(0);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [micSwitchError, setMicSwitchError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -23,8 +30,23 @@ export function RoomPage() {
   const mic = useMicControl(track);
   const devices = useAudioInputs(stream !== null);
 
+  /** Try to get (back) into the room after a delay that grows with repeated failures. */
+  const scheduleRejoin = useCallback(() => {
+    failures.current += 1;
+    if (failures.current > MAX_RECONNECT_ATTEMPTS) {
+      setFatalError("Lost the connection to the room and couldn't get back in. Check your network and rejoin.");
+      return;
+    }
+    setReconnecting(true);
+    clearTimeout(retryTimer.current);
+    retryTimer.current = setTimeout(() => setJoinTick((t) => t + 1), retryDelayMs(failures.current));
+  }, []);
+
+  useEffect(() => () => clearTimeout(retryTimer.current), []);
+
   // Join (HTTP) only once the mic is granted, so the 60s join-token clock
-  // doesn't run out while the permission prompt is still showing.
+  // doesn't run out while the permission prompt is still showing. Re-runs
+  // (with a fresh identity) whenever joinTick changes, i.e. after a lost connection.
   useEffect(() => {
     if (!roomId || !stream) return;
     let cancelled = false;
@@ -32,26 +54,45 @@ export function RoomPage() {
       .then((res) => {
         if (!cancelled) setIdentity(res);
       })
-      .catch(() => {
-        if (!cancelled) setJoinError("Could not join this room. It may not exist or may be full.");
+      .catch((err) => {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 404) setFatalError("This room doesn't exist or has ended.");
+        else if (err instanceof ApiError && err.status === 403) setFatalError("This room is full.");
+        else scheduleRejoin(); // network trouble: keep trying
       });
     return () => {
       cancelled = true;
     };
-  }, [roomId, stream]);
+  }, [roomId, stream, joinTick, scheduleRejoin]);
+
+  /** The room connection died (closed or silently dead): drop our identity and rejoin from scratch. */
+  const handleSignalingLost = useCallback(() => {
+    setIdentity(null);
+    scheduleRejoin();
+  }, [scheduleRejoin]);
 
   const {
     participants,
     remoteStreams,
     connectionStats,
     error: peerError,
+    connectionEpoch,
     replaceAudioTrack,
   } = usePeerManager({
     roomId: roomId ?? "",
     participantId: identity?.participantId ?? "",
     token: identity?.token ?? "",
     localStream: stream,
+    onSignalingLost: handleSignalingLost,
   });
+
+  // The room accepting us proves the connection works: reset the backoff.
+  useEffect(() => {
+    if (connectionEpoch > 0) {
+      failures.current = 0;
+      setReconnecting(false);
+    }
+  }, [connectionEpoch]);
 
   /** Manual mic switch: open the new device, hand it to every peer, then retire the old track. */
   async function handleSelectMic(deviceId: string) {
@@ -90,10 +131,10 @@ export function RoomPage() {
     );
   }
 
-  if (joinError) {
+  if (fatalError) {
     return (
       <Centered>
-        <p>{joinError}</p>
+        <p>{fatalError}</p>
         <button className="btn btn-secondary" onClick={() => navigate("/")}>
           Back home
         </button>
@@ -102,7 +143,16 @@ export function RoomPage() {
   }
 
   if (micLoading || !identity) {
-    return <Centered>Connecting…</Centered>;
+    return reconnecting ? (
+      <Centered>
+        <p>Connection lost — reconnecting…</p>
+        <button className="btn btn-secondary" onClick={() => navigate("/")}>
+          Leave
+        </button>
+      </Centered>
+    ) : (
+      <Centered>Connecting…</Centered>
+    );
   }
 
   return (

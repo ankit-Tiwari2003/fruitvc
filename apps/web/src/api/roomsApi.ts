@@ -48,7 +48,7 @@ export async function createRoom(): Promise<CreateRoomResponse> {
 export interface RoomInfoResponse {
   exists: boolean;
   participantCount: number;
-  createdAt: number;
+  createdAt: number | null;
 }
 
 export async function getRoomInfo(roomId: string): Promise<RoomInfoResponse> {
