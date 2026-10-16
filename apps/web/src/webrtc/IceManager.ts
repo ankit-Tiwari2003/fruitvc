@@ -11,8 +11,24 @@ import type { TurnCredentialResponse, TurnProviderId } from "../../../../package
 
 const CLOUDFLARE_STUN_URL = "stun:stun.cloudflare.com:3478";
 
+/** What we know about the TURN relay (the fallback path when a direct connection is impossible). */
+export type RelayStatus = "unconfigured" | "unknown" | "working" | "unavailable";
+
+/**
+ * Test switch: open the room URL with ?relay=1 to force every connection
+ * through the relay. Direct connections are the norm, so without this you'd
+ * never find out whether the relay actually works until someone can't connect.
+ */
+export function isRelayTestMode(): boolean {
+  return typeof location !== "undefined" && new URLSearchParams(location.search).get("relay") === "1";
+}
+
 export interface IceConfig {
   iceServers: RTCIceServer[];
+  /** "relay" = relay-only test mode (see isRelayTestMode). */
+  iceTransportPolicy: RTCIceTransportPolicy;
+  /** Why the Worker offered no relay, when it didn't (diagnostics only). */
+  relayNote?: string;
   /** Which provider issued the TURN credentials, if any — needed by
    *  ConnectionMonitor to tag usage reports correctly. null means
    *  STUN-only (no relay available right now). */
@@ -21,6 +37,7 @@ export interface IceConfig {
 
 export async function fetchIceConfig(apiBaseUrl: string): Promise<IceConfig> {
   const iceServers: RTCIceServer[] = [{ urls: CLOUDFLARE_STUN_URL }];
+  const iceTransportPolicy: RTCIceTransportPolicy = isRelayTestMode() ? "relay" : "all";
 
   let creds: TurnCredentialResponse;
   try {
@@ -31,11 +48,11 @@ export async function fetchIceConfig(apiBaseUrl: string): Promise<IceConfig> {
     // STUN-only is a legitimate degraded state, not a fatal error — most
     // direct P2P connections don't need TURN at all. Log and continue.
     console.warn("Could not fetch TURN credentials, continuing STUN-only:", err);
-    return { iceServers, relayProvider: null };
+    return { iceServers, iceTransportPolicy, relayProvider: null, relayNote: "could_not_fetch_turn_credentials" };
   }
 
   if (creds.provider === "none" || !creds.urls || !creds.username || !creds.credential) {
-    return { iceServers, relayProvider: null };
+    return { iceServers, iceTransportPolicy, relayProvider: null, relayNote: creds.reason ?? "no_relay_offered" };
   }
 
   iceServers.push({
@@ -44,5 +61,5 @@ export async function fetchIceConfig(apiBaseUrl: string): Promise<IceConfig> {
     credential: creds.credential,
   });
 
-  return { iceServers, relayProvider: creds.provider };
+  return { iceServers, iceTransportPolicy, relayProvider: creds.provider };
 }

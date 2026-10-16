@@ -97,9 +97,10 @@ export const ROOM_LIMITS = {
 // linger as ghost participants.
 export const HEARTBEAT = {
   INTERVAL_MS: 15_000, // how often clients ping (web client keeps its own copy of this)
-  // Generous on purpose: browsers throttle timers in background tabs, and the
-  // whole point of this app is to sit in a background tab while you game.
-  TIMEOUT_MS: 120_000,
+  // Three missed pings. Chrome doesn't throttle timers for tabs that hold
+  // WebRTC/WebSocket connections, so an idle background tab still pings on
+  // time. A dropped phone session is cleared from the room within about a minute.
+  TIMEOUT_MS: 45_000,
   SWEEP_INTERVAL_MS: 20_000, // how often the server checks for silent connections
 } as const;
 
@@ -113,6 +114,8 @@ export interface TurnCredentialResponse {
   credential?: string;
   urls?: string[];
   ttl?: number; // seconds
+  /** Why no relay is being offered (only set when provider is "none"). For diagnostics. */
+  reason?: string;
 }
 
 // Monthly byte caps per provider, deliberately conservative relative to each

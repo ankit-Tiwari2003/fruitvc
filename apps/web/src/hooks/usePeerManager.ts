@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { PeerManager } from "../webrtc/PeerManager";
 import type { ConnectionStats } from "../webrtc/ConnectionMonitor";
+import type { RelayStatus } from "../webrtc/IceManager";
 import type { Participant } from "../../../../packages/shared/src/protocol";
 import { getApiBaseUrl, getWsBaseUrl } from "../api/roomsApi";
 
@@ -18,6 +19,8 @@ export interface UsePeerManagerResult {
   remoteStreams: Map<string, MediaStream>;
   connectionStats: Map<string, ConnectionStats>;
   error: { code: string; message: string } | null;
+  /** Whether the TURN relay (the fallback path) works for this device. */
+  relay: { status: RelayStatus; detail?: string };
   /** Increments each time the room accepts us and sends the member list. */
   connectionEpoch: number;
   /** Swaps the outgoing mic track on every peer connection, no renegotiation. */
@@ -42,6 +45,7 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
   const [connectionStats, setConnectionStats] = useState<Map<string, ConnectionStats>>(new Map());
   const [error, setError] = useState<{ code: string; message: string } | null>(null);
   const [connectionEpoch, setConnectionEpoch] = useState(0);
+  const [relay, setRelay] = useState<{ status: RelayStatus; detail?: string }>({ status: "unknown" });
 
   const managerRef = useRef<PeerManager | null>(null);
   const lostRef = useRef(opts.onSignalingLost);
@@ -59,6 +63,7 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
     setRemoteStreams(new Map());
     setConnectionStats(new Map());
     setError(null);
+    setRelay({ status: "unknown" });
 
     const manager = new PeerManager({
       apiBaseUrl: getApiBaseUrl(),
@@ -75,6 +80,7 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
         setConnectionStats((prev) => new Map(prev).set(participantId, stats));
       },
       onConnected: () => setConnectionEpoch((n) => n + 1),
+      onRelayStatus: (status, detail) => setRelay({ status, detail }),
       onPeerRemoved: (participantId) => {
         setRemoteStreams((prev) => without(prev, participantId));
         setConnectionStats((prev) => without(prev, participantId));
@@ -96,5 +102,5 @@ export function usePeerManager(opts: UsePeerManagerOptions): UsePeerManagerResul
     await managerRef.current?.replaceAudioTrack(track);
   }, []);
 
-  return { participants, remoteStreams, connectionStats, error, connectionEpoch, replaceAudioTrack };
+  return { participants, remoteStreams, connectionStats, error, relay, connectionEpoch, replaceAudioTrack };
 }

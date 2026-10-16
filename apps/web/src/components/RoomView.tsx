@@ -7,6 +7,8 @@ import { ParticipantGrid } from "./ParticipantGrid";
 import { ParticipantDetails } from "./ParticipantDetails";
 import { NetworkPanel } from "./NetworkPanel";
 import { SettingsPanel } from "./SettingsPanel";
+import { ConnectivityPanel } from "./ConnectivityPanel";
+import { isRelayTestMode, type RelayStatus } from "../webrtc/IceManager";
 import { ControlBar } from "./ControlBar";
 import { formatRoomCode } from "../utils/format";
 
@@ -17,6 +19,7 @@ export interface RoomViewProps {
   remoteStreams: Map<string, MediaStream>;
   connectionStats: Map<string, ConnectionStats>;
   peerError: string | null;
+  relay: { status: RelayStatus; detail?: string };
   copied: boolean;
   onCopyInvite: () => void;
   onLeave: () => void;
@@ -44,11 +47,12 @@ export function RoomView(props: RoomViewProps) {
   const { devices, activeDeviceId } = props.micInput;
   const localInputLabel = devices.find((d) => d.deviceId === activeDeviceId)?.label ?? "Default microphone";
 
+  const relayTestMode = isRelayTestMode();
   const peers = participants.filter((p) => p.id !== localParticipantId);
   const selected = peers.find((p) => p.id === selectedId) ?? null; // falls back to summary if they left
   // Stats entries outlive a peer that left (the hook never prunes them), so
   // only summarise peers who are actually still in the room.
-  const peerStats = peers.map((p) => connectionStats.get(p.id)).filter((s): s is ConnectionStats => s !== undefined);
+  const peerStats = peers.map((p) => connectionStats.get(p.id)).filter((s): s is ConnectionStats => s !== undefined && s.connectionState === "connected");
 
   return (
     <div className="room">
@@ -56,6 +60,7 @@ export function RoomView(props: RoomViewProps) {
         <div className="room-title">
           <span className="brand">🍉 FruitVC</span>
           <span className="muted">Room {formatRoomCode(props.roomId)}</span>
+          {relayTestMode && <span className="chip chip--relay">Relay-only test</span>}
         </div>
         <button className="btn btn-secondary btn-small" onClick={props.onCopyInvite}>
           {props.copied ? "Link copied!" : "Copy invite link"}
@@ -86,6 +91,7 @@ export function RoomView(props: RoomViewProps) {
             <NetworkPanel stats={peerStats} />
           )}
         </section>
+        <ConnectivityPanel relay={props.relay} relayTestMode={relayTestMode} />
         <SettingsPanel
           devices={props.micInput.devices}
           activeDeviceId={props.micInput.activeDeviceId}

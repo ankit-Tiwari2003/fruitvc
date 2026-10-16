@@ -145,10 +145,10 @@ export default {
     // (direct P2P only) is better than no call.
     if (url.pathname === "/api/turn-credentials" && request.method === "GET") {
       const providers = configuredProviders(env);
-      const chosen = await selectAvailableProvider(env.RATE_LIMIT, providers);
+      const chosen = await selectAvailableProvider(env.RATE_LIMIT, providers, env);
 
       if (!chosen) {
-        return cors(env, jsonResponse({ provider: "none" }));
+        return cors(env, jsonResponse({ provider: "none", reason: "all_providers_at_monthly_cap" }));
       }
 
       try {
@@ -158,7 +158,7 @@ export default {
         // Provider is configured but the live request failed (outage, bad
         // key, etc). Don't fail the whole call — just report no relay.
         console.error(`TURN credential fetch failed for ${chosen}:`, err);
-        return cors(env, jsonResponse({ provider: "none" }));
+        return cors(env, jsonResponse({ provider: "none", reason: `${chosen}_credential_fetch_failed` }));
       }
     }
 

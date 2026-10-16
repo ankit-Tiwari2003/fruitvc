@@ -76,6 +76,7 @@ export function RoomPage() {
     remoteStreams,
     connectionStats,
     error: peerError,
+    relay,
     connectionEpoch,
     replaceAudioTrack,
   } = usePeerManager({
@@ -163,6 +164,7 @@ export function RoomPage() {
       remoteStreams={remoteStreams}
       connectionStats={connectionStats}
       peerError={peerError?.message ?? null}
+      relay={relay}
       copied={copied}
       onCopyInvite={handleCopyInvite}
       onLeave={() => navigate("/")}

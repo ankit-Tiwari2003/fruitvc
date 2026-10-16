@@ -5,6 +5,7 @@ import type { ConnectionStats } from "../webrtc/ConnectionMonitor";
 import { ConnectionBadge } from "./ConnectionBadge";
 import { participantColor } from "../utils/identity";
 import { bytesToKbps, formatJitter, formatKbps, formatRtt } from "../utils/format";
+import { useStalled } from "../hooks/useStalled";
 
 export interface ParticipantTileProps {
   participant: Participant;
@@ -31,6 +32,10 @@ export function ParticipantTile({
   onSelect,
 }: ParticipantTileProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  // Numbers only mean something while the connection is actually up. A member
+  // whose connection never formed (or died) must not look like a healthy "Good" one.
+  const connected = stats?.connectionState === "connected";
+  const stalled = useStalled(!isLocal && !connected);
 
   useEffect(() => {
     if (audioRef.current && remoteStream) audioRef.current.srcObject = remoteStream;
@@ -58,15 +63,24 @@ export function ParticipantTile({
         </div>
       ) : (
         <>
+          {!connected && (
+            <p className={`card-note ${stalled ? "card-note--bad" : ""}`}>
+              {stalled
+                ? "No connection — they may have dropped. Dead sessions are cleared automatically."
+                : stats?.connectionState === "disconnected"
+                  ? "Connection interrupted…"
+                  : "Connecting…"}
+            </p>
+          )}
           <div className="card-metrics">
-            <Metric label="Latency" value={stats ? formatRtt(stats.roundTripTimeMs) : dash} />
-            <Metric label="Jitter" value={stats ? formatJitter(stats.jitterMs) : dash} />
-            <Metric label="Packets lost" value={stats ? String(stats.packetsLost) : dash} />
-            <Metric label="Path" value={stats ? (stats.isRelayed ? "Relay" : "Direct") : dash} />
-            <Metric label="Quality" value={stats ? <ConnectionBadge quality={stats.quality} /> : dash} />
+            <Metric label="Latency" value={connected && stats ? formatRtt(stats.roundTripTimeMs) : dash} />
+            <Metric label="Jitter" value={connected && stats ? formatJitter(stats.jitterMs) : dash} />
+            <Metric label="Packet loss" value={connected && stats ? `${stats.lossPercent.toFixed(1)}%` : dash} />
+            <Metric label="Path" value={connected && stats ? (stats.isRelayed ? "Relay" : "Direct") : dash} />
+            <Metric label="Quality" value={connected && stats ? <ConnectionBadge quality={stats.quality} /> : dash} />
             <Metric
               label="Download"
-              value={stats ? formatKbps(bytesToKbps(stats.bytesReceivedDelta, stats.intervalMs)) : dash}
+              value={connected && stats ? formatKbps(bytesToKbps(stats.bytesReceivedDelta, stats.intervalMs)) : dash}
             />
           </div>
           <button className="select-btn" onClick={onSelect}>

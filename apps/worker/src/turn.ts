@@ -4,11 +4,14 @@ export interface TurnEnv {
   // Metered dedicated account (optional — leave unset if you don't have one)
   METERED_APP_NAME?: string; // e.g. "fruitvc" -> fruitvc.metered.live
   METERED_API_KEY?: string;
+  /** Optional: monthly relay cap in MB for the Metered slot. Set this to match your plan's quota. */
+  METERED_CAP_MB?: string;
 
   // Xirsys (optional — leave unset if you don't have one)
   XIRSYS_IDENT?: string;
   XIRSYS_SECRET?: string;
   XIRSYS_CHANNEL?: string;
+  XIRSYS_CAP_MB?: string;
 }
 
 /** Which providers are usable right now, based on which secrets are configured. */
@@ -21,20 +24,36 @@ export function configuredProviders(env: TurnEnv): TurnProviderId[] {
   return providers;
 }
 
-async function fetchMeteredCredentials(env: TurnEnv): Promise<TurnCredentialResponse> {
-  const url = `https://${env.METERED_APP_NAME}.metered.live/api/v1/turn/credentials?apiKey=${env.METERED_API_KEY}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Metered credential fetch failed: ${res.status}`);
-  const data = (await res.json()) as { iceServers: { urls: string[]; username: string; credential: string }[] };
-  const turnServer = data.iceServers.find((s) => s.urls.some((u) => u.startsWith("turn")));
-  if (!turnServer) throw new Error("Metered response had no TURN entry");
+/**
+ * Metered's GET /api/v1/turn/credentials returns a BARE ARRAY of ICE servers
+ * (one STUN entry plus several TURN entries for different ports/transports,
+ * all sharing one username/credential). We also accept { iceServers: [...] }
+ * in case that ever changes. Exported so it can be tested without the network.
+ */
+export function parseMeteredIceServers(data: unknown): TurnCredentialResponse {
+  const list = Array.isArray(data) ? data : (data as { iceServers?: unknown } | null)?.iceServers;
+  if (!Array.isArray(list)) throw new Error("Metered response was not an ICE server list");
+
+  type Entry = { urls: string | string[]; username?: string; credential?: string };
+  const isTurn = (e: Entry): boolean =>
+    !!e && !!e.username && !!e.credential && [e.urls].flat().some((u) => /^turns?:/i.test(u));
+  const turnEntries = (list as Entry[]).filter(isTurn);
+  if (turnEntries.length === 0) throw new Error("Metered response had no TURN entries");
+
   return {
     provider: "metered",
-    username: turnServer.username,
-    credential: turnServer.credential,
-    urls: turnServer.urls,
+    username: turnEntries[0].username!,
+    credential: turnEntries[0].credential!,
+    urls: [...new Set(turnEntries.flatMap((e) => [e.urls].flat().filter((u) => /^turns?:/i.test(u))))],
     ttl: 3600,
   };
+}
+
+async function fetchMeteredCredentials(env: TurnEnv): Promise<TurnCredentialResponse> {
+  const url = `https://${env.METERED_APP_NAME}.metered.live/api/v1/turn/credentials?apiKey=${encodeURIComponent(env.METERED_API_KEY ?? "")}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Metered credential fetch failed: ${res.status}`);
+  return parseMeteredIceServers(await res.json());
 }
 
 async function fetchXirsysCredentials(env: TurnEnv): Promise<TurnCredentialResponse> {

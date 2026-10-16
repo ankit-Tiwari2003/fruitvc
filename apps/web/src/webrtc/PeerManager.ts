@@ -1,6 +1,6 @@
 import type { Participant, TurnProviderId } from "../../../../packages/shared/src/protocol";
 import { SignalingClient } from "./SignalingClient";
-import { fetchIceConfig, type IceConfig } from "./IceManager";
+import { fetchIceConfig, type IceConfig, type RelayStatus } from "./IceManager";
 import { ConnectionMonitor, type ConnectionStats } from "./ConnectionMonitor";
 
 /**
@@ -28,6 +28,8 @@ export interface PeerManagerOptions {
   onRemoteStream?: (participantId: string, stream: MediaStream) => void;
   onParticipantListChanged?: (participants: Participant[]) => void;
   onConnectionStats?: (participantId: string, stats: ConnectionStats) => void;
+  /** What we've learned about whether the TURN relay actually works for us. */
+  onRelayStatus?: (status: RelayStatus, detail?: string) => void;
   /** The server accepted us and sent the current member list (a successful (re)connect). */
   onConnected?: () => void;
   /** A peer connection was torn down (they left, it failed, or we lost signaling). */
@@ -52,6 +54,7 @@ export class PeerManager {
   private knownParticipants = new Map<string, Participant>();
   private iceConfig: IceConfig | null = null;
   private stopped = false;
+  private relayStatus: RelayStatus | null = null;
 
   constructor(options: PeerManagerOptions) {
     this.opts = options;
@@ -77,6 +80,8 @@ export class PeerManager {
   async start(): Promise<void> {
     this.iceConfig = await fetchIceConfig(this.opts.apiBaseUrl);
     if (this.stopped) return; // torn down while the ICE config was loading
+    if (this.iceConfig.relayProvider === null) this.setRelayStatus("unconfigured", this.iceConfig.relayNote);
+    else this.setRelayStatus("unknown");
     this.signaling.connect();
   }
 
@@ -178,7 +183,25 @@ export class PeerManager {
     const existing = this.peers.get(participantId);
     if (existing) return existing.pc;
 
-    const pc = new RTCPeerConnection({ iceServers: this.iceConfig?.iceServers ?? [] });
+    const pc = new RTCPeerConnection({
+      iceServers: this.iceConfig?.iceServers ?? [],
+      iceTransportPolicy: this.iceConfig?.iceTransportPolicy ?? "all",
+    });
+
+    // Relay diagnostics. Browsers always try to allocate a relay address in the
+    // background even when a direct path wins, so we can tell whether TURN works
+    // without ever routing real audio through it.
+    let sawRelay = false;
+    let turnError: string | undefined;
+    pc.onicecandidateerror = (event) => {
+      const e = event as RTCPeerConnectionIceErrorEvent;
+      if (e.url && /^turns?:/i.test(e.url)) turnError = `${e.errorCode}${e.errorText ? ` ${e.errorText}` : ""}`.trim();
+    };
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState === "complete" && !sawRelay && this.iceConfig?.relayProvider) {
+        this.setRelayStatus("unavailable", turnError ?? "no relay address could be allocated");
+      }
+    };
 
     for (const track of this.opts.localStream.getTracks()) {
       pc.addTrack(track, this.opts.localStream);
@@ -186,6 +209,10 @@ export class PeerManager {
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        if (!sawRelay && (event.candidate.type === "relay" || / typ relay/.test(event.candidate.candidate))) {
+          sawRelay = true;
+          this.setRelayStatus("working");
+        }
         this.signaling.sendIceCandidate(participantId, event.candidate.toJSON());
       }
     };
@@ -225,6 +252,12 @@ export class PeerManager {
     entry.monitor.stop();
     entry.pc.close();
     if (notify && !this.stopped) this.opts.onPeerRemoved?.(participantId);
+  }
+
+  private setRelayStatus(status: RelayStatus, detail?: string): void {
+    if (this.stopped || (this.relayStatus === status && detail === undefined)) return;
+    this.relayStatus = status;
+    this.opts.onRelayStatus?.(status, detail);
   }
 
   private emitParticipantList(): void {

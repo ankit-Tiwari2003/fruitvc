@@ -235,3 +235,9 @@ button { cursor: pointer; }
 .mic-btn--on { background: var(--good); }
 .mic-btn--off { background: var(--bad); }
 .mic-btn--ptt { background: var(--panel-2); border: 1px solid var(--border); }
+
+/* ---------- chips and notes ---------- */
+.chip { font-size: 0.72rem; padding: 3px 9px; border-radius: 999px; border: 1px solid currentColor; }
+.chip--relay { color: var(--relay); }
+.card-note { font-size: 0.82rem; color: var(--muted); }
+.card-note--bad { color: var(--bad); }

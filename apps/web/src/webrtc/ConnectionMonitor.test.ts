@@ -11,6 +11,7 @@ const sentReports: unknown[] = [];
 function buildStatsReport(opts: {
   rttSeconds: number;
   packetsLost: number;
+  packetsReceived: number;
   jitterSeconds: number;
   bytesSent: number;
   bytesReceived: number;
@@ -43,6 +44,7 @@ function buildStatsReport(opts: {
     type: "inbound-rtp",
     kind: "audio",
     packetsLost: opts.packetsLost,
+    packetsReceived: opts.packetsReceived,
     jitter: opts.jitterSeconds,
   });
 
@@ -56,10 +58,10 @@ async function run() {
   // Simulated sequence of poll results: starts excellent, degrades to poor,
   // and switches from direct to relayed partway through.
   const scenarios = [
-    { rttSeconds: 0.02, packetsLost: 0, jitterSeconds: 0.005, bytesSent: 10_000, bytesReceived: 10_000, relayed: false },
-    { rttSeconds: 0.18, packetsLost: 2, jitterSeconds: 0.02, bytesSent: 20_000, bytesReceived: 20_000, relayed: false },
-    { rttSeconds: 0.35, packetsLost: 60, jitterSeconds: 0.06, bytesSent: 30_000, bytesReceived: 30_000, relayed: true },
-    { rttSeconds: 0.33, packetsLost: 70, jitterSeconds: 0.055, bytesSent: 1_030_000, bytesReceived: 1_030_000, relayed: true },
+    { rttSeconds: 0.02, packetsLost: 0, packetsReceived: 100, jitterSeconds: 0.005, bytesSent: 10_000, bytesReceived: 10_000, relayed: false },
+    { rttSeconds: 0.18, packetsLost: 2, packetsReceived: 200, jitterSeconds: 0.02, bytesSent: 20_000, bytesReceived: 20_000, relayed: false },
+    { rttSeconds: 0.35, packetsLost: 60, packetsReceived: 300, jitterSeconds: 0.06, bytesSent: 30_000, bytesReceived: 30_000, relayed: true },
+    { rttSeconds: 0.33, packetsLost: 70, packetsReceived: 400, jitterSeconds: 0.055, bytesSent: 1_030_000, bytesReceived: 1_030_000, relayed: true },
   ];
 
   const fakePc = {
@@ -101,6 +103,10 @@ async function run() {
   assert(quals[0] === "excellent", `expected first poll excellent, got ${quals[0]}`);
   assert(quals[2] === "poor", `expected third poll poor, got ${quals[2]}`);
 
+  assert(statsHistory[0].lossPercent === 0, "first reading only sets the loss baseline (0%)");
+  assert(statsHistory[2].lossPercent > 5, `heavy recent loss is reported as a rate (got ${statsHistory[2].lossPercent.toFixed(1)}%)`);
+  console.log(`✅ loss is a rate: first reading ${statsHistory[0].lossPercent}%, heavy-loss reading ${statsHistory[2].lossPercent.toFixed(1)}%`);
+
   const relayFlags = statsHistory.map((s) => s.isRelayed);
   assert(relayFlags[0] === false, "expected first poll not relayed");
   assert(relayFlags[2] === true, "expected third poll relayed");
@@ -120,6 +126,25 @@ async function run() {
   console.log(`\n✅ All assertions passed. Relayed-only bytes correctly isolated: ${report.bytesSent + report.bytesReceived} bytes`);
 }
 
+async function longCallStaysHealthy() {
+  // 500 packets were lost long ago; since then the link is clean. The old cumulative
+  // counter made this read "poor" forever; the rate-based measure must not.
+  let n = 0;
+  const pc = {
+    getStats: async () => {
+      n++;
+      return buildStatsReport({ rttSeconds: 0.03, packetsLost: 500, packetsReceived: 100_000 + n * 125, jitterSeconds: 0.004, bytesSent: n * 1000, bytesReceived: n * 1000, relayed: false });
+    },
+  } as unknown as RTCPeerConnection;
+  const seen: ConnectionStats[] = [];
+  const m = new ConnectionMonitor({ pc, participantId: "x", myParticipantId: "y", roomId: "R", relayProvider: null, apiBaseUrl: "https://fake", pollIntervalMs: 20, usageReportIntervalMs: 10_000_000, onStats: (st) => seen.push(st) });
+  m.start();
+  await new Promise((r) => setTimeout(r, 150));
+  m.stop();
+  assert(seen.length >= 4 && seen.every((st) => st.lossPercent === 0 && st.quality === "excellent"), `long call with old loss total stays "excellent" (${seen.length} readings, all 0% loss)`);
+  console.log(`✅ long call with 500 old lost packets stays "excellent" across ${seen.length} readings (was permanently "poor" before)`);
+}
+
 function assert(cond: boolean, msg: string): void {
   if (!cond) {
     console.error(`❌ ASSERTION FAILED: ${msg}`);
@@ -127,7 +152,7 @@ function assert(cond: boolean, msg: string): void {
   }
 }
 
-run().catch((err) => {
+run().then(longCallStaysHealthy).then(() => process.exit(0)).catch((err) => {
   console.error("Test crashed:", err);
   process.exit(1);
 });

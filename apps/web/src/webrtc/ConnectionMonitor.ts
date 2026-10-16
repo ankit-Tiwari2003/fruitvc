@@ -21,11 +21,15 @@ export interface ConnectionStats {
   quality: ConnectionQuality;
   roundTripTimeMs: number | null;
   packetsLost: number;
+  /** Share of incoming audio packets lost over the last ~10 seconds (not the whole call). */
+  lossPercent: number;
   jitterMs: number | null;
   isRelayed: boolean;
   relayProvider: TurnProviderId | null;
   bytesSentDelta: number;
   bytesReceivedDelta: number;
+  /** The peer connection's real state. Quality numbers are only meaningful while "connected". */
+  connectionState: RTCPeerConnectionState;
   /** Poll interval these deltas cover, so the UI can convert bytes to kbps. */
   intervalMs: number;
 }
@@ -61,6 +65,11 @@ export class ConnectionMonitor {
 
   // Previous poll's raw byte counters, to compute per-interval deltas
   // (getStats() reports cumulative totals, not deltas).
+  // Loss is measured as a rate over a short window; the browser's counter is cumulative.
+  private prevPacketsLost = 0;
+  private prevPacketsReceived = 0;
+  private lossBaselineSet = false;
+  private lossWindow: { lost: number; received: number }[] = [];
   private prevBytesSent = 0;
   private prevBytesReceived = 0;
 
@@ -112,6 +121,7 @@ export class ConnectionMonitor {
 
     let roundTripTimeMs: number | null = null;
     let packetsLost = 0;
+    let packetsReceived = 0;
     let jitterMs: number | null = null;
     let isRelayed = false;
     let bytesSent = 0;
@@ -153,6 +163,7 @@ export class ConnectionMonitor {
 
       if (stat.type === "inbound-rtp" && stat.kind === "audio") {
         if (typeof stat.packetsLost === "number") packetsLost += stat.packetsLost;
+        if (typeof stat.packetsReceived === "number") packetsReceived += stat.packetsReceived;
         if (typeof stat.jitter === "number") jitterMs = stat.jitter * 1000;
       }
     }
@@ -171,18 +182,37 @@ export class ConnectionMonitor {
       this.unreportedBytesReceived += receivedDelta;
     }
 
-    const quality = deriveQuality({ roundTripTimeMs, packetsLost, jitterMs });
+    // The first reading only sets the baseline, so a monitor attached to a
+    // long-running connection doesn't mistake its lifetime total for fresh loss.
+    let lostDelta = 0;
+    let recvDelta = 0;
+    if (this.lossBaselineSet) {
+      lostDelta = Math.max(0, packetsLost - this.prevPacketsLost);
+      recvDelta = Math.max(0, packetsReceived - this.prevPacketsReceived);
+    }
+    this.lossBaselineSet = true;
+    this.prevPacketsLost = packetsLost;
+    this.prevPacketsReceived = packetsReceived;
+    this.lossWindow.push({ lost: lostDelta, received: recvDelta });
+    if (this.lossWindow.length > LOSS_WINDOW_POLLS) this.lossWindow.shift();
+    const windowLost = this.lossWindow.reduce((a, w) => a + w.lost, 0);
+    const windowRecv = this.lossWindow.reduce((a, w) => a + w.received, 0);
+    const lossPercent = windowLost + windowRecv > 0 ? (windowLost / (windowLost + windowRecv)) * 100 : 0;
+
+    const quality = deriveQuality({ roundTripTimeMs, lossPercent, jitterMs });
 
     this.opts.onStats?.({
       quality,
       roundTripTimeMs,
       packetsLost,
+      lossPercent,
       jitterMs,
       isRelayed,
       relayProvider: isRelayed ? this.opts.relayProvider : null,
       bytesSentDelta: sentDelta,
       bytesReceivedDelta: receivedDelta,
       intervalMs: this.opts.pollIntervalMs,
+      connectionState: this.pc.connectionState,
     });
   }
 
@@ -220,12 +250,14 @@ export class ConnectionMonitor {
   }
 }
 
+const LOSS_WINDOW_POLLS = 4; // 4 polls x 2.5s = the last ~10 seconds
+
 function deriveQuality(input: {
   roundTripTimeMs: number | null;
-  packetsLost: number;
+  lossPercent: number;
   jitterMs: number | null;
 }): ConnectionQuality {
-  const { roundTripTimeMs, packetsLost, jitterMs } = input;
+  const { roundTripTimeMs, lossPercent, jitterMs } = input;
 
   // No data yet (connection still negotiating) — treat as good rather than
   // alarming the user with "poor" before a baseline exists.
@@ -237,14 +269,15 @@ function deriveQuality(input: {
   // conversations start to feel broken.
   const poorRtt = roundTripTimeMs > 300;
   const poorJitter = jitterMs !== null && jitterMs > 50;
-  const poorLoss = packetsLost > 50; // cumulative — a rough heuristic, not a rate
+  const poorLoss = lossPercent > 5; // audible dropouts start around here
 
   if (poorRtt || poorJitter || poorLoss) return "poor";
 
   const goodRtt = roundTripTimeMs > 150;
   const goodJitter = jitterMs !== null && jitterMs > 30;
+  const goodLoss = lossPercent > 2;
 
-  if (goodRtt || goodJitter) return "good";
+  if (goodRtt || goodJitter || goodLoss) return "good";
 
   return "excellent";
 }

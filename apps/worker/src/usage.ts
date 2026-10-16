@@ -27,12 +27,24 @@ export async function getProviderUsageBytes(
   return raw ? Number(raw) : 0;
 }
 
+export interface CapOverrides {
+  METERED_CAP_MB?: string;
+  XIRSYS_CAP_MB?: string;
+}
+
+/** The monthly cap for a provider; METERED_CAP_MB / XIRSYS_CAP_MB override the built-in default. */
+export function providerCapBytes(provider: TurnProviderId, overrides: CapOverrides = {}): number {
+  const mb = provider === "metered" ? Number(overrides.METERED_CAP_MB) : provider === "xirsys" ? Number(overrides.XIRSYS_CAP_MB) : 0;
+  return mb > 0 ? mb * 1024 * 1024 : TURN_PROVIDER_CAPS_BYTES[provider];
+}
+
 export async function isProviderOverCap(
   kv: KVNamespace,
-  provider: TurnProviderId
+  provider: TurnProviderId,
+  overrides: CapOverrides = {}
 ): Promise<boolean> {
   const used = await getProviderUsageBytes(kv, provider);
-  return used >= TURN_PROVIDER_CAPS_BYTES[provider];
+  return used >= providerCapBytes(provider, overrides);
 }
 
 /**
@@ -60,7 +72,8 @@ export async function recordProviderUsage(
  */
 export async function selectAvailableProvider(
   kv: KVNamespace,
-  configuredProviders: TurnProviderId[]
+  configuredProviders: TurnProviderId[],
+  overrides: CapOverrides = {}
 ): Promise<TurnProviderId | null> {
   // Priority order: dedicated accounts first (more reliable, not shared),
   // shared Open Relay pool last (always "configured" since it needs no setup).
@@ -68,7 +81,7 @@ export async function selectAvailableProvider(
 
   for (const provider of priority) {
     if (!configuredProviders.includes(provider)) continue;
-    const overCap = await isProviderOverCap(kv, provider);
+    const overCap = await isProviderOverCap(kv, provider, overrides);
     if (!overCap) return provider;
   }
   return null;
