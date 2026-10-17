@@ -241,3 +241,18 @@ button { cursor: pointer; }
 .chip--relay { color: var(--relay); }
 .card-note { font-size: 0.82rem; color: var(--muted); }
 .card-note--bad { color: var(--bad); }
+
+/* ---------- speaking indicator ---------- */
+.wave { display: flex; align-items: center; gap: 2px; height: 30px; }
+.wave-bar {
+  flex: 1;
+  min-width: 2px;
+  max-width: 6px;
+  border-radius: 2px;
+  background: var(--muted);
+  opacity: 0.3;
+  transition: height 80ms linear, opacity 150ms ease;
+}
+.wave--live .wave-bar { background: var(--tile-color); opacity: 0.95; }
+.card { transition: box-shadow 150ms ease, border-color 150ms ease; }
+.card--speaking { border-color: var(--tile-color); box-shadow: 0 0 0 1px var(--tile-color), 0 0 16px -2px var(--tile-color); }

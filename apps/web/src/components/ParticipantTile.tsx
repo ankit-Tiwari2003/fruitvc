@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { Participant } from "../../../../packages/shared/src/protocol";
 import type { ConnectionStats } from "../webrtc/ConnectionMonitor";
@@ -6,6 +6,7 @@ import { ConnectionBadge } from "./ConnectionBadge";
 import { participantColor } from "../utils/identity";
 import { bytesToKbps, formatJitter, formatKbps, formatRtt } from "../utils/format";
 import { useStalled } from "../hooks/useStalled";
+import { SpeakingWave } from "./SpeakingWave";
 
 export interface ParticipantTileProps {
   participant: Participant;
@@ -15,6 +16,7 @@ export interface ParticipantTileProps {
   volume: number; // 0..1, applied to remote audio only
   micLive: boolean; // local card only: is our mic currently sending?
   inputLabel: string; // local card only: name of the mic device in use
+  micTrack: MediaStreamTrack | null; // local card only: the mic being sent
   selected: boolean;
   onSelect: () => void;
 }
@@ -28,10 +30,12 @@ export function ParticipantTile({
   volume,
   micLive,
   inputLabel,
+  micTrack,
   selected,
   onSelect,
 }: ParticipantTileProps) {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const [speaking, setSpeaking] = useState(false);
   // Numbers only mean something while the connection is actually up. A member
   // whose connection never formed (or died) must not look like a healthy "Good" one.
   const connected = stats?.connectionState === "connected";
@@ -49,12 +53,21 @@ export function ParticipantTile({
   const dash = "—";
 
   return (
-    <div className={`card ${isLocal ? "card--local" : ""} ${selected ? "card--selected" : ""}`} style={style}>
+    <div
+      className={`card ${isLocal ? "card--local" : ""} ${selected ? "card--selected" : ""} ${speaking ? "card--speaking" : ""}`}
+      style={style}
+    >
       <div className="card-head">
         <span className="color-dot" />
         <strong className="card-name">{participant.name}</strong>
         {isLocal && <span className="you-tag">You</span>}
       </div>
+
+      {/* Remote: what's actually arriving. You: your mic, but only while it's live (muted = flat). */}
+      <SpeakingWave
+        source={isLocal ? (micLive ? micTrack : null) : (remoteStream ?? null)}
+        onSpeakingChange={setSpeaking}
+      />
 
       {isLocal ? (
         <div className="card-metrics">

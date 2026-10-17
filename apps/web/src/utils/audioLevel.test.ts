@@ -1,4 +1,4 @@
-import { rmsDb, dbToMeter, classifyPeak } from "./audioLevel";
+import { rmsDb, dbToMeter, classifyPeak, dbToWave } from "./audioLevel";
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) {
@@ -25,3 +25,7 @@ assert(classifyPeak(-41) === "low", "-41 dB is low");
 assert(classifyPeak(-55) === "low", "-55 dB (boundary) is low");
 assert(classifyPeak(-56) === "silent", "-56 dB is silent");
 assert(classifyPeak(-100) === "silent", "-100 dB is silent");
+
+assert(dbToWave(-55) === 0 && dbToWave(-15) === 1, "wave bar: room noise is flat, loud speech is full height");
+assert(near(dbToWave(-35), 0.5, 1e-9), "wave bar: -35 dB is half height");
+assert(dbToWave(-100) === 0 && dbToWave(0) === 1, "wave bar clamps out-of-range values");

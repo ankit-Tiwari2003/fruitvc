@@ -24,3 +24,16 @@ export function classifyPeak(peakDb: number): LevelStatus {
   if (peakDb >= SILENT_DB) return "low";
   return "silent";
 }
+
+// ---- active-speaker detection ----
+// A participant counts as "speaking" once their level passes ON, and keeps that
+// state until it has stayed below OFF for a short hold time (so pauses between
+// words don't make the indicator flicker). Tweak here if it's too eager/lazy.
+export const SPEAKING_ON_DB = -45;
+export const SPEAKING_OFF_DB = -50;
+export const SPEAKING_HOLD_MS = 400;
+
+/** Maps dBFS to a 0..1 bar height: room noise (-55 dB) is flat, loud speech (-15 dB) is full. */
+export function dbToWave(db: number): number {
+  return Math.min(1, Math.max(0, (db + 55) / 40));
+}

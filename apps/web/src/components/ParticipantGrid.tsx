@@ -10,6 +10,7 @@ export interface ParticipantGridProps {
   volume: number;
   localMicLive: boolean;
   localInputLabel: string;
+  localMicTrack: MediaStreamTrack | null;
   selectedId: string | null;
   onSelect: (participantId: string | null) => void;
 }
@@ -22,6 +23,7 @@ export function ParticipantGrid({
   volume,
   localMicLive,
   localInputLabel,
+  localMicTrack,
   selectedId,
   onSelect,
 }: ParticipantGridProps) {
@@ -43,6 +45,7 @@ export function ParticipantGrid({
           volume={volume}
           micLive={localMicLive}
           inputLabel={localInputLabel}
+          micTrack={localMicTrack}
           selected={p.id === selectedId}
           onSelect={() => onSelect(p.id === selectedId ? null : p.id)}
         />

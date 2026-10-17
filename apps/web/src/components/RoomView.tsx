@@ -77,6 +77,7 @@ export function RoomView(props: RoomViewProps) {
           volume={props.volume}
           localMicLive={props.mic.isTransmitting}
           localInputLabel={localInputLabel}
+          localMicTrack={props.micInput.track}
           selectedId={selected?.id ?? null}
           onSelect={setSelectedId}
         />
